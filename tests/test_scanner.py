@@ -255,12 +255,21 @@ def test_converted_file_is_not_requeued(env):
     os.remove(env.f.path) if os.path.exists(env.f.path) else None
     env.scanner.scan_library(env.lib.id)
     assert env.db.get_file(env.f.id).status == "converted"
-    # Even if the file looks bloated and changes, it is never converted again.
-    make_video(path, seconds=3, size=SIZE, crf=1)
+    # Even if the file looks bloated and changes, x265 is never converted again.
+    make_video(path, seconds=3, size=SIZE, vcodec="libx265", crf=1)
     env.scanner.scan_library(env.lib.id)
     assert env.db.get_file(env.f.id).status == "converted"
     env.scanner.reevaluate(env.lib.id)
     assert env.db.get_file(env.f.id).status == "converted"
+
+
+def test_older_format_copy_replacing_a_converted_file_is_queued(env):
+    path = env.efficient("movie.mkv")
+    st = os.stat(path)
+    row = env.db.upsert_file(env.lib.id, str(path), st.st_size, st.st_mtime, "converted")
+    env.bloated("movie.mkv")  # another app puts a new copy at the same path
+    env.scanner.scan_library(env.lib.id)
+    assert env.db.get_file(row.id).status == "queued"
 
 
 def test_unchanged_row_is_not_probed_again(env, monkeypatch):

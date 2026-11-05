@@ -388,6 +388,12 @@ class Database:
         )
         return self._get_run(cur.lastrowid)
 
+    def was_converted_from(self, file_id: int, size: int) -> bool:
+        """True if a finished run on this file started from a file of exactly this size."""
+        return bool(self._query(
+            "SELECT 1 FROM runs WHERE file_id=? AND state='done' AND was_size=? LIMIT 1",
+            (file_id, size)))
+
     def run_record(self, run_id: int) -> Optional[dict]:
         """Every column of a run, including the path it started from."""
         rows = self._query("SELECT * FROM runs WHERE id=?", (run_id,))

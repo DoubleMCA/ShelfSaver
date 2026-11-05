@@ -187,8 +187,11 @@ class Scanner:
                                          & READ_ONLY_ATTRIBUTE))
         details = file_details(info)
         if row is not None and row.status == "converted":
-            # Never converted twice; only the extra-language audio can still be removed.
-            if decision.action == "strip_only":
+            # Never converted twice; only the extra-language audio can still be removed. A changed
+            # file in an older format is a new copy, unless it is an original that was put back.
+            new_copy = (decision.action == "convert" and not unchanged
+                        and not self.db.was_converted_from(row.id, st.st_size))
+            if decision.action == "strip_only" or new_copy:
                 self._write(row, library, path, st, "queued", None, **details)
             else:
                 self._write(row, library, path, st, "converted", None, **details)

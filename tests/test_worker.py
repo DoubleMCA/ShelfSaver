@@ -21,6 +21,7 @@ from shelfsaver.config import Config
 from shelfsaver.db import Database
 from shelfsaver.encode import EncodeResult
 from shelfsaver.probe import probe
+from shelfsaver.scanner import Scanner
 from shelfsaver.swap import FileInUse, TargetExists, UnexpectedSwapState
 from shelfsaver.worker import GB, IN_USE_RETRY_SECONDS, TARGET_TAKEN, WAITING_IN_USE, Worker
 from tests.helpers import convert, eng_spa, info, make_video
@@ -149,6 +150,40 @@ class Env:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     return Env(tmp_path, monkeypatch)
+
+
+# ---- A converted file changing later ----
+
+def test_new_copy_at_a_converted_path_is_converted_and_both_originals_are_held(env):
+    f = env.queue_video()
+    env.worker.process_one()
+    assert env.status() == "converted"
+    first_original = env.original_bytes
+
+    replacement = source_video(env.lib / "movie.mkv", seconds=3)
+    replacement_bytes = replacement.read_bytes()
+    env.encode_output = dict(vcodec="libx265", crf=35, seconds=3, size=SIZE)
+    Scanner(env.db, env.config, stable_seconds=0).scan_library(env.library.id)
+    assert env.status() == "queued"
+
+    env.worker.process_one()
+    assert env.status() == "converted"
+    assert probe(env.file().path, "ffprobe").video_codec == "hevc"
+    assert env.held("movie.mkv").read_bytes() == first_original
+    assert env.held("movie (1).mkv").read_bytes() == replacement_bytes
+    assert len(env.db.file_details(f.id)["runs"]) == 2
+
+
+def test_original_put_back_from_holding_is_not_converted_again(env):
+    env.queue_video()
+    env.worker.process_one()
+    assert env.status() == "converted"
+
+    shutil.copy2(env.held("movie.mkv"), env.lib / "movie.mkv")
+    Scanner(env.db, env.config, stable_seconds=0).scan_library(env.library.id)
+    assert env.status() == "converted"
+    env.worker.process_one()
+    assert env.encodes == 1
 
 
 # ---- End to end on the real graphics card ----
