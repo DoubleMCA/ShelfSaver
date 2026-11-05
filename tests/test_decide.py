@@ -96,7 +96,7 @@ def test_keeps_all_when_no_english():
     assert audio_to_remove(audio(("spa", None, True), ("fre", None, False))) == ()
 
 
-@pytest.mark.parametrize("lang", [None, "und"])
+@pytest.mark.parametrize("lang", [None, "", "   ", "und", "UND", "und-US", "und_US"])
 def test_keeps_all_when_any_track_unlabeled(lang):
     assert audio_to_remove(audio(("eng", None, True), (lang, None, False))) == ()
 

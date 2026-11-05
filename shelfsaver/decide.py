@@ -12,9 +12,13 @@ _DUB = re.compile(r"\bdub(bed)?\b", re.IGNORECASE)
 _EFFICIENT_WHY = "Already stored in a modern, efficient format"
 
 
-def _is_english(lang) -> bool:
+def _primary_language(lang) -> str:
     # Only the main part of the tag counts, so en-US and en_GB are English but enm is not.
-    return bool(lang) and lang.strip().lower().replace("_", "-").split("-")[0] in _ENGLISH
+    return (lang or "").strip().lower().replace("_", "-").split("-")[0]
+
+
+def _is_english(lang) -> bool:
+    return _primary_language(lang) in _ENGLISH
 
 
 def audio_to_remove(streams) -> tuple:
@@ -22,7 +26,7 @@ def audio_to_remove(streams) -> tuple:
     audio = [s for s in streams if s.kind == "audio"]
     if len(audio) < 2:
         return ()
-    if any(not s.language or s.language.strip().lower() == "und" for s in audio):
+    if any(_primary_language(s.language) in ("", "und") for s in audio):
         return ()
     if any(s.title and _DUB.search(s.title) for s in audio):
         return ()
