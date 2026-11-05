@@ -8,6 +8,7 @@ import os
 from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from shelfsaver.swap import (
     execute_swap,
     ext_path,
     held_size,
+    is_volume_root,
     make_plan,
     recover_swap,
     work_root,
@@ -335,13 +337,167 @@ def test_recovery_will_not_touch_a_foreign_file_at_the_final_path(library, fake_
     assert snapshot(fake_volume) == before
 
 
+def interrupted_after_first_step(plan, monkeypatch) -> None:
+    with monkeypatch.context() as patch:
+        crash_after(patch, 1)
+        with pytest.raises(SimulatedCrash):
+            execute_swap(plan)
+
+
 def test_original_is_not_deleted_when_final_is_the_same_file(library, monkeypatch):
     plan = prepare(library, ".mp4", False)
-    os.remove(plan.temp)
-    write_file(Path(plan.final), NEW)
-    monkeypatch.setattr(swap, "_same_file", lambda a, b: True)
+    interrupted_after_first_step(plan, monkeypatch)
+    os.remove(plan.original)
+    try:
+        os.link(plan.final, plan.original)
+    except OSError:
+        pytest.skip("this volume has no hardlinks")
+    assert recover_swap(plan) == "unexpected"
+    assert read_file(plan.original) == NEW
+    assert read_file(plan.final) == NEW
+
+
+def test_original_is_not_deleted_when_the_same_file_check_fails(library, monkeypatch):
+    plan = prepare(library, ".mp4", False)
+    interrupted_after_first_step(plan, monkeypatch)
+
+    def failing_samefile(first, second):
+        raise OSError(21, "device not ready")
+
+    monkeypatch.setattr(swap.os.path, "samefile", failing_samefile)
     assert recover_swap(plan) == "unexpected"
     assert read_file(plan.original) == OLD
+
+
+def foreign_final(plan) -> None:
+    """Temp gone, with somebody else's file of exactly the expected size at the final path."""
+    os.remove(plan.temp)
+    data = b"X" * plan.expected_size
+    write_file(Path(plan.final), data)
+
+
+@pytest.mark.parametrize("holding", [False, True])
+def test_foreign_file_of_the_same_size_never_costs_the_original(library, fake_volume, holding):
+    plan = prepare(library, ".mp4", holding)
+    foreign_final(plan)
+    before = snapshot(fake_volume)
+
+    assert recover_swap(plan) == "unexpected"
+    assert snapshot(fake_volume) == before
+    with pytest.raises(UnexpectedSwapState):
+        execute_swap(plan)
+    assert snapshot(fake_volume) == before
+    assert read_file(plan.original) == OLD
+
+
+@pytest.mark.parametrize("holding", [False, True])
+def test_foreign_file_of_the_same_size_is_not_reported_finished(library, fake_volume, holding):
+    plan = prepare(library, ".mp4", holding)
+    foreign_final(plan)
+    if holding:
+        write_file(Path(plan.holding), OLD)
+    os.remove(plan.original)
+    assert recover_swap(plan) == "unexpected"
+
+
+@pytest.mark.parametrize("holding", [False, True])
+def test_same_name_original_of_matching_size_is_not_reported_finished(library, holding):
+    plan = prepare(library, ".mkv", holding)
+    os.remove(plan.temp)
+    os.remove(plan.original)
+    write_file(Path(plan.original), b"X" * plan.expected_size)
+    if holding:
+        write_file(Path(plan.holding), OLD)
+    assert recover_swap(plan) == "unexpected"
+    assert read_file(plan.original) == b"X" * plan.expected_size
+
+
+def test_foreign_temp_of_the_same_size_is_refused(library, fake_volume):
+    plan = prepare(library, ".mp4", False)
+    os.remove(plan.temp)
+    write_file(Path(plan.temp), b"X" * plan.expected_size)
+    before = snapshot(fake_volume)
+    with pytest.raises(UnexpectedSwapState):
+        execute_swap(plan)
+    assert snapshot(fake_volume) == before
+
+
+def test_unavailable_file_id_means_identity_is_not_confirmed(library, monkeypatch):
+    real_lstat = os.lstat
+
+    def lstat_without_file_id(path, **kwargs):
+        info = real_lstat(path, **kwargs)
+        return SimpleNamespace(st_mode=info.st_mode, st_size=info.st_size, st_ino=0)
+
+    monkeypatch.setattr(swap.os, "lstat", lstat_without_file_id)
+    plan = prepare(library, ".mp4", False)
+    assert plan.temp_file_id == 0
+    with pytest.raises(UnexpectedSwapState):
+        execute_swap(plan)  # never start a swap that could not be recovered
+    assert_untouched(plan)
+
+    os.rename(plan.temp, plan.final)
+    assert recover_swap(plan) == "unexpected"
+    assert read_file(plan.original) == OLD
+    assert read_file(plan.final) == NEW
+
+
+@pytest.mark.parametrize("final_ext,holding", ALL_FOUR_CASES)
+def test_file_id_survives_the_swap(library, final_ext, holding):
+    plan = prepare(library, final_ext, holding)
+    assert plan.temp_file_id != 0
+    execute_swap(plan)
+    assert os.stat(plan.final).st_ino == plan.temp_file_id
+
+
+def test_large_file_id_survives_a_json_round_trip(library):
+    refs_sized_id = 2**128 - 1
+    plan = dataclasses.replace(prepare(library), temp_file_id=refs_sized_id)
+    loaded = SwapPlan(**json.loads(json.dumps(dataclasses.asdict(plan))))
+    assert loaded.temp_file_id == refs_sized_id
+    assert isinstance(loaded.temp_file_id, int)
+
+
+def test_original_vanishing_mid_swap_leaves_the_new_file_in_the_library(library, monkeypatch):
+    plan = prepare(library, ".mp4", False)
+    monkeypatch.setattr(swap, "_flush_to_disk", lambda path: os.remove(plan.original))
+    execute_swap(plan)
+    assert_finished(plan)
+
+
+def test_original_vanishing_before_it_can_be_held_keeps_the_new_file(library, monkeypatch):
+    plan = prepare(library, ".mp4", True)
+    monkeypatch.setattr(swap, "_flush_to_disk", lambda path: os.remove(plan.original))
+    with pytest.raises(UnexpectedSwapState):
+        execute_swap(plan)
+    assert read_file(plan.final) == NEW
+    assert not exists(plan.temp)
+
+
+def test_temp_vanishing_after_the_original_is_held_restores_the_original(library, monkeypatch):
+    plan = prepare(library, ".mkv", True)
+    monkeypatch.setattr(swap, "_flush_to_disk", lambda path: os.remove(plan.temp))
+    with pytest.raises(FileNotFoundError):
+        execute_swap(plan)
+    assert read_file(plan.original) == OLD
+    assert not exists(plan.holding)
+
+
+@pytest.mark.parametrize("holding,outcome", [(False, "finished"), (True, "unexpected")])
+def test_original_vanishing_during_recovery(library, monkeypatch, holding, outcome):
+    plan = prepare(library, ".mp4", holding)
+    interrupted_after_first_step(plan, monkeypatch)
+    real_state = swap._swap_state
+
+    def state_then_vanish(checked):
+        monkeypatch.setattr(swap, "_swap_state", real_state)
+        found = real_state(checked)
+        os.remove(checked.original)
+        return found
+
+    monkeypatch.setattr(swap, "_swap_state", state_then_vanish)
+    assert recover_swap(plan) == outcome
+    assert read_file(plan.final) == NEW
 
 
 # --- files in use and failures part way through ---
@@ -530,14 +686,49 @@ def test_volume_root_of_a_missing_drive_stays_on_that_drive():
     assert REAL_VOLUME_ROOT(f"{letters[0]}:\\Movies").upper() == f"{letters[0]}:\\"
 
 
-def test_offline_library_counts_and_clears_nothing(monkeypatch):
-    letters = [c for c in "ZYXWVUTSRQPONMLKJIHGFED" if not os.path.exists(f"{c}:\\")]
-    if not letters:
-        pytest.skip("every drive letter is in use")
-    monkeypatch.setattr(swap, "_volume_root", REAL_VOLUME_ROOT)
-    offline = f"{letters[0]}:\\Movies"
+def test_offline_library_counts_and_clears_nothing(tmp_path, monkeypatch):
+    missing_volume = tmp_path / "not-connected"
+    monkeypatch.setattr(swap, "_volume_root", lambda path: str(missing_volume))
+    offline = missing_volume / "Movies"
     assert held_size([offline]) == 0
     assert clear_holding([offline]) == 0
+    assert not missing_volume.exists()
+
+
+def test_is_volume_root(library, fake_volume):
+    assert is_volume_root(fake_volume)
+    assert is_volume_root(str(fake_volume) + os.sep)
+    assert not is_volume_root(library)
+
+
+def test_is_volume_root_with_the_real_lookup(monkeypatch):
+    monkeypatch.setattr(swap, "_volume_root", REAL_VOLUME_ROOT)
+    assert is_volume_root("C:\\")
+    assert not is_volume_root("C:\\Some\\Folder\\That\\Need\\Not\\Exist")
+
+
+@pytest.mark.parametrize("holding", [False, True])
+def test_library_at_the_volume_root_is_refused(fake_volume, holding):
+    original = write_file(fake_volume / "Movie.mkv", OLD)
+    temp = write_file(fake_volume / "ShelfSaver" / "incoming" / "run.mkv", NEW)
+    with pytest.raises(ValueError):
+        make_plan(str(original), str(temp), ".mkv", str(fake_volume), "Movies", holding)
+
+
+@pytest.mark.parametrize("holding", [False, True])
+def test_original_inside_the_work_folder_is_refused(fake_volume, holding):
+    held_library = fake_volume / "ShelfSaver" / "holding" / "Movies"
+    original = write_file(held_library / "Movie.mkv", OLD)
+    temp = write_file(fake_volume / "ShelfSaver" / "incoming" / "run.mkv", NEW)
+    with pytest.raises(ValueError):
+        make_plan(str(original), str(temp), ".mkv", str(held_library), "Movies", holding)
+
+
+def test_folder_merely_named_like_the_work_folder_is_allowed(fake_volume):
+    library = fake_volume / "ShelfSaver2"
+    original = write_file(library / "Movie.mkv", OLD)
+    temp = write_file(fake_volume / "ShelfSaver" / "incoming" / "run.mkv", NEW)
+    assert make_plan(str(original), str(temp), ".mkv", str(library), "Movies", False)
 
 
 def test_holding_folder_that_cannot_be_checked_is_refused(library, monkeypatch):

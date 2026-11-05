@@ -67,6 +67,7 @@ class SwapPlan:
     final: str
     holding: Optional[str]
     expected_size: int
+    temp_file_id: int  # survives a rename on the same volume, so it identifies the new file
 
 
 def ext_path(path) -> str:
@@ -102,6 +103,22 @@ def work_root(library_path) -> Path:
     return Path(_volume_root(library_path)) / "ShelfSaver"
 
 
+def is_volume_root(library_path) -> bool:
+    """True when the library is a whole volume, which would put `ShelfSaver\\` inside it."""
+    def comparable(path) -> str:
+        return os.path.normcase(os.path.abspath(path)).rstrip("\\")
+
+    return comparable(library_path) == comparable(_volume_root(library_path))
+
+
+def _is_inside(path: str, folder: Path) -> bool:
+    path, folder = os.path.normcase(path), os.path.normcase(str(folder))
+    try:
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:  # different drives
+        return False
+
+
 def _safe_folder_name(library_name: str) -> str:
     name = _BAD_NAME_CHARS.sub("_", library_name).rstrip(". ")
     if not name or name.split(".")[0].upper() in _RESERVED_NAMES:
@@ -126,9 +143,17 @@ def _free_holding_path(wanted: str) -> str:
 def make_plan(
     original, temp, final_ext: str, library_path, library_name: str, holding_enabled: bool
 ) -> SwapPlan:
-    """Plan a swap. An extension differing only in letter case keeps the original's name."""
+    """Plan a swap. An extension differing only in letter case keeps the original's name.
+
+    Raises `ValueError` for a library at a volume root, and for an original inside
+    `work_root`, so a held file can never be treated as an original.
+    """
     original = os.path.abspath(original)
     temp = os.path.abspath(temp)
+    if is_volume_root(library_path):
+        raise ValueError(f"The library {library_path} is a whole volume")
+    if _is_inside(original, work_root(library_path)):
+        raise ValueError(f"{original} is inside the ShelfSaver work folder")
     final = os.path.splitext(original)[0] + final_ext
     if os.path.normcase(final) == os.path.normcase(original):
         final = original
@@ -143,26 +168,38 @@ def make_plan(
                 work_root(library_path), "holding", _safe_folder_name(library_name), relative
             )
         )
-    return SwapPlan(original, temp, final, holding, os.stat(ext_path(temp)).st_size)
+    info = os.lstat(ext_path(temp))
+    return SwapPlan(original, temp, final, holding, info.st_size, info.st_ino)
 
 
 def _keeps_name(plan: SwapPlan) -> bool:
     return os.path.normcase(plan.final) == os.path.normcase(plan.original)
 
 
-def _has_size(path: str, size: int) -> bool:
+def _is_new_file(path: str, plan: SwapPlan) -> bool:
+    """True only if `path` is provably the planned temp file, wherever it has been renamed to.
+
+    Size alone is not enough: a different file of the same size must never count as ours.
+    A file ID of 0 means the volume gave no usable ID, so identity is not confirmed.
+    """
     try:
         info = os.lstat(ext_path(path))
     except OSError:
         return False
-    return stat.S_ISREG(info.st_mode) and info.st_size == size
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_size == plan.expected_size
+        and plan.temp_file_id != 0
+        and info.st_ino == plan.temp_file_id
+    )
 
 
-def _same_file(first: str, second: str) -> bool:
+def _may_be_same_file(first: str, second: str) -> bool:
+    """True if both paths reach one file, or if that cannot be ruled out."""
     try:
         return os.path.samefile(ext_path(first), ext_path(second))
     except OSError:
-        return False
+        return True
 
 
 def _swap_state(plan: SwapPlan) -> str:
@@ -170,22 +207,21 @@ def _swap_state(plan: SwapPlan) -> str:
     temp = _present(plan.temp)
     original = _present(plan.original)
     held = plan.holding is not None and _present(plan.holding)
-    size = plan.expected_size
 
     if _keeps_name(plan):
         if temp and original and not held:
             return _NOT_STARTED
-        if plan.holding and not original and held and _has_size(plan.temp, size):
+        if plan.holding and not original and held and _is_new_file(plan.temp, plan):
             return _MIDWAY
-        if not temp and _has_size(plan.original, size) and held == bool(plan.holding):
+        if not temp and _is_new_file(plan.original, plan) and held == bool(plan.holding):
             return _FINISHED
         return _UNEXPECTED
 
     final = _present(plan.final)
     if temp and original and not final and not held:
         return _NOT_STARTED
-    if not temp and _has_size(plan.final, size):
-        if original and not held and not _same_file(plan.original, plan.final):
+    if not temp and _is_new_file(plan.final, plan):
+        if original and not held and not _may_be_same_file(plan.original, plan.final):
             return _MIDWAY
         if not original and held == bool(plan.holding):
             return _FINISHED
@@ -269,8 +305,8 @@ def execute_swap(plan: SwapPlan) -> None:
         if _target_taken(plan):
             raise TargetExists(f"A different file is in the way of the swap for {plan.original}")
         raise UnexpectedSwapState(f"Files on disk match no swap step for {plan.original}")
-    if state == _NOT_STARTED and not _has_size(plan.temp, plan.expected_size):
-        raise UnexpectedSwapState(f"The new file for {plan.original} is not the expected size")
+    if state == _NOT_STARTED and not _is_new_file(plan.temp, plan):
+        raise UnexpectedSwapState(f"The new file for {plan.original} is not the planned file")
 
     with _swap_errors():
         if state == _NOT_STARTED:
@@ -278,7 +314,14 @@ def execute_swap(plan: SwapPlan) -> None:
             _first_step(plan)
         try:
             _last_step(plan)
-        except OSError:
+        except OSError as exc:
+            if not _keeps_name(plan) and not _present(plan.original):
+                # The original vanished. Never pull the only new copy back out of the library.
+                if plan.holding:
+                    raise UnexpectedSwapState(
+                        f"{plan.original} vanished before it could be held"
+                    ) from exc
+                return
             _undo_first_step(plan)
             raise
 
@@ -290,13 +333,21 @@ def recover_swap(plan: SwapPlan) -> Literal["finished", "not_started", "unexpect
     - "not_started": the original is untouched and the temp file is still there.
     - "unexpected": the disk matches no step, so nothing was touched.
 
-    Raises `FileInUse` if the remaining step is blocked; nothing changes, so run it again later.
+    Raises, leaving the plan safe to recover again later:
+    - `FileInUse` if the remaining step is blocked by another program.
+    - `TargetExists` if a file appeared where the remaining step would move one.
+    - `OSError` for any other failure of that step.
     """
     state = _swap_state(plan)
     if state == _MIDWAY:
-        with _swap_errors():
-            _last_step(plan)
-        return _FINISHED
+        try:
+            with _swap_errors():
+                _last_step(plan)
+            return _FINISHED
+        except FileNotFoundError:
+            state = _swap_state(plan)  # something vanished since the check, so judge again
+            if state == _MIDWAY:
+                raise
     if state == _UNEXPECTED:
         logger.warning("Files on disk match no swap step for %s; left as is", plan.original)
     return state
