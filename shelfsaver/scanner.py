@@ -15,9 +15,8 @@ from typing import Callable, Optional
 from . import swap
 from .decide import decide
 from .models import FileRow, Library
-from .probe import ProbeError, probe
+from .probe import UNREADABLE, ProbeError, file_details, probe
 from .swap import ext_path
-from .worker import UNREADABLE, _file_details
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +80,14 @@ class Scanner:
     def _work_root(library: Library) -> str:
         return str(swap.work_root(library.path))
 
-    def _is_candidate(self, path: str, work: Optional[str] = None) -> bool:
+    def _is_candidate(self, path: str, work: Optional[str] = None,
+                      root: Optional[str] = None) -> bool:
         name = os.path.basename(path)
         lower = name.lower()
         if lower.endswith(SKIP_SUFFIXES) or os.path.splitext(lower)[1] not in EXTENSIONS:
             return False
-        if any(part.lower() in SKIP_FOLDERS for part in Path(path).parts[:-1]):
+        inner = os.path.relpath(path, root) if root and _is_inside(path, root) else path
+        if any(part.lower() in SKIP_FOLDERS for part in Path(inner).parts[:-1]):
             return False
         return not (work and _is_inside(path, work))
 
@@ -161,7 +162,7 @@ class Scanner:
         decision = decide(info, library.level, library.english_only, nlink=nlink,
                           read_only=bool(getattr(st, "st_file_attributes", 0)
                                          & READ_ONLY_ATTRIBUTE))
-        details = _file_details(info)
+        details = file_details(info)
         if row is not None and row.status == "converted":
             # Never converted twice; only the extra-language audio can still be removed.
             if decision.action == "strip_only":
@@ -175,11 +176,8 @@ class Scanner:
         self._forget(path)
 
     def _write(self, row, library, path, st, status, reason, **details) -> None:
-        current = self.db.get_file_by_path(path)  # the worker may have taken it meanwhile
-        if self._owned(current):
-            return
-        self.db.upsert_file(library.id, path, st.st_size, st.st_mtime, status, reason,
-                            **details)
+        self.db.upsert_file_unless_owned(library.id, path, st.st_size, st.st_mtime, status,
+                                         reason, **details)
 
     def _process(self, library: Library, path: str, row: Optional[FileRow] = None,
                  force: bool = False) -> bool:
@@ -193,7 +191,7 @@ class Scanner:
                 self._forget(path)
                 if (row is not None and row.status != "missing" and not self._owned(row)
                         and self._reachable(library)):
-                    self.db.set_file_status(row.id, "missing")
+                    self.db.set_missing_unless_owned(row.id)
                 return True
             except PermissionError:
                 return False
@@ -229,7 +227,7 @@ class Scanner:
                                 and not _is_inside(path, work)):
                             stack.append(path)
                         continue
-                    if not self._is_candidate(path, work):
+                    if not self._is_candidate(path, work, root):
                         continue
                     yield path, entry.stat()
                 except OSError as exc:
@@ -245,7 +243,8 @@ class Scanner:
                 logger.warning("Library %s is offline", library.name)
                 self.db.update_library(library.id, status="offline")
             return
-        if library.status != "ok":
+        came_back = library.status != "ok"
+        if came_back:
             self.db.update_library(library.id, status="ok")
             library = next(l for l in self.db.list_libraries() if l.id == library_id)
             self.refresh_watches()
@@ -262,6 +261,8 @@ class Scanner:
                 continue
             with self._lock:
                 self._pending.discard(path)
+        if came_back and not self._stopping():
+            self.reevaluate(library.id)  # its settings may have changed while it was away
         if self._stopping() or problems or not self._reachable(library):
             return
         for key, row in rows.items():
@@ -270,10 +271,8 @@ class Scanner:
             # Confirm it is really gone, and that the owner has not just picked it up.
             if os.path.lexists(ext_path(row.path)):
                 continue
-            current = self.db.get_file(row.id)
-            if current is not None and not self._owned(current):
-                logger.info("No longer there: %s", row.path)
-                self.db.set_file_status(row.id, "missing")
+            logger.info("No longer there: %s", row.path)
+            self.db.set_missing_unless_owned(row.id)
 
     def scan_all(self) -> None:
         for library in self.db.list_libraries():
@@ -298,7 +297,7 @@ class Scanner:
                 self._forget(path)
                 continue
             work = self._work_root(library)
-            if not self._is_candidate(path, work):
+            if not self._is_candidate(path, work, library.path):
                 self._forget(path)
                 continue
             if self._process(library, path):
@@ -333,7 +332,10 @@ class Scanner:
 
     def _on_event(self, path) -> None:
         path = os.fspath(path)
-        if self._is_candidate(path):
+        with self._lock:
+            roots = [p for p, _ in self._watches.values()]
+        root = next((r for r in roots if _is_inside(path, r)), None)
+        if root and self._is_candidate(path, root=root):
             self._add_pending(path)
 
     def refresh_watches(self) -> None:
@@ -348,15 +350,15 @@ class Scanner:
         with self._lock:
             for key in [k for k in self._watches if k not in wanted]:
                 try:
-                    observer.unschedule(self._watches.pop(key))
+                    observer.unschedule(self._watches.pop(key)[1])
                 except Exception:
                     logger.exception("Could not stop watching %s", key)
             for key, path in wanted.items():
                 if key in self._watches:
                     continue
                 try:
-                    self._watches[key] = observer.schedule(
-                        _Handler(self), path, recursive=True)
+                    self._watches[key] = (path, observer.schedule(
+                        _Handler(self), path, recursive=True))
                 except Exception:
                     logger.exception("Could not watch %s", path)
 

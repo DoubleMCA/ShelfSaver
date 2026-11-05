@@ -165,6 +165,18 @@ def probe(path, ffprobe) -> MediaInfo:
     return parse_probe(data, path, size)
 
 
+UNREADABLE = "Couldn't read this file"
+
+
+def file_details(info: MediaInfo) -> dict:
+    """The codec, container and resolution kept on a file's row."""
+    return {
+        "codec": info.video_codec,
+        "container": info.ext.lstrip("."),
+        "resolution": f"{info.width}x{info.height}" if info.width else None,
+    }
+
+
 class ScanStopped(Exception):
     """A packet scan was interrupted by a stop request."""
 

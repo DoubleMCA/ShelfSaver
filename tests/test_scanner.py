@@ -353,3 +353,29 @@ def test_one_bad_file_does_not_stop_the_scan(env, monkeypatch):
     env.scanner.scan_library(env.lib.id)
     assert env.status(ok) == "queued"
     assert env.status(env.root / "boom.mkv") is None
+
+
+def test_library_folder_named_like_a_disc_folder_is_still_scanned(tmp_path, monkeypatch):
+    # VIDEO_TS and BDMV only exclude folders inside the library, not above it.
+    e = Env(tmp_path, monkeypatch)
+    inner = tmp_path / "BDMV" / "lib"
+    inner.mkdir(parents=True)
+    lib = e.db.add_library("Odd", str(inner), "high", False)
+    clip = make_video(inner / "clip.mkv", seconds=2, size=SIZE, crf=1)
+    e.scanner.scan_library(lib.id)
+    assert e.status(clip) == "queued"
+
+
+def test_settings_changed_while_offline_apply_when_it_returns(env):
+    big = env.root / "x.mkv"
+    make_video(big, seconds=2, size=SIZE, crf=1)
+    st = os.stat(big)
+    env.db.upsert_file(env.lib.id, str(big), st.st_size, st.st_mtime, "skipped", "Already small")
+    env.remove_root()
+    env.scanner.scan_library(env.lib.id)
+    env.db.update_library(env.lib.id, level="low")
+    env.scanner.reevaluate(env.lib.id)  # silently does nothing while offline
+    assert env.status(big) == "skipped"
+    env.restore_root()
+    env.scanner.scan_library(env.lib.id)
+    assert env.status(big) == "queued"

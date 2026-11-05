@@ -25,7 +25,7 @@ from typing import Callable, Optional
 from .decide import decide
 from .encode import EncodeResult, build_command, output_extension, run_ffmpeg
 from .models import RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
-from .probe import ProbeError, probe
+from .probe import UNREADABLE, ProbeError, file_details, probe
 from .swap import (
     FileInUse,
     SwapPlan,
@@ -63,7 +63,6 @@ BREAKER_MESSAGE = "Paused: conversions keep failing. Check the graphics card and
 
 WAITING_IN_USE = "Waiting, file is in use"
 WHOLE_DRIVE = "This library is a whole drive. Choose a folder on the drive instead."
-UNREADABLE = "Couldn't read this file"
 CONVERT_FAILED = "The conversion failed"
 SOMETHING_WRONG = "Something went wrong with this file"
 SWAP_KEPT = ("Couldn't finish replacing this file. Nothing was deleted. "
@@ -98,14 +97,6 @@ def _list_folder(path) -> list[os.DirEntry]:
 
 def _format_name(codec: Optional[str]) -> str:
     return _FORMAT_NAMES.get(codec or "", (codec or "unknown").upper())
-
-
-def _file_details(info: MediaInfo) -> dict:
-    return {
-        "codec": info.video_codec,
-        "container": info.ext.lstrip("."),
-        "resolution": f"{info.width}x{info.height}" if info.width else None,
-    }
 
 
 def _stream_record(stream) -> dict:
@@ -458,7 +449,7 @@ class Worker:
         decision = decide(info, library.level, library.english_only,
                           nlink=info_stat.st_nlink,
                           read_only=not info_stat.st_mode & stat.S_IWRITE)
-        details = _file_details(info)
+        details = file_details(info)
         if decision.action == "skip":
             logger.info("Skipping %s: %s", file.path, decision.reason)
             self.db.upsert_file(library.id, file.path, size, mtime, "skipped", decision.reason,
@@ -485,9 +476,16 @@ class Worker:
             self._set_status("blocked", file.path, message=NO_ROOM_SCRATCH)
             return False
 
-        run = self.db.start_run(file.id, size, _format_name(info.video_codec),
-                                info.video_bitrate, decision.why)
-        self.db.upsert_file(library.id, file.path, size, mtime, "working", **details)
+        # Claim the row first. If the scanner changed it since it was picked, take nothing.
+        if not self.db.claim_file(file.id, file.size, file.mtime, size, mtime, **details):
+            logger.info("%s changed while being looked at, so it is left for later", file.path)
+            return True
+        try:
+            run = self.db.start_run(file.id, size, _format_name(info.video_codec),
+                                    info.video_bitrate, decision.why)
+        except BaseException:
+            self.db.set_file_status(file.id, "queued")
+            raise
         folder = scratch / "ShelfSaver" / f"run-{run.id}"
         job = _Job(file, library, size, mtime, info, decision, run, folder,
                    folder / f"output{out_ext}")
@@ -837,7 +835,7 @@ class Worker:
             logger.warning("Could not read the finished file %s: %s", plan.final, exc)
             size, mtime = now_size, file.mtime
         try:
-            details = _file_details(probe(ext_path(plan.final), self.config.ffprobe))
+            details = file_details(probe(ext_path(plan.final), self.config.ffprobe))
         except ProbeError as exc:
             logger.warning("Could not inspect the finished file %s: %s", plan.final, exc)
             details = {"codec": file.codec, "container": Path(plan.final).suffix.lstrip("."),

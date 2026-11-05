@@ -1487,3 +1487,20 @@ def test_scratch_folder_gone_means_waiting_not_failing(env):
     assert env.worker.process_one() is False
     assert env.worker.status()["state"] == "no_scratch"
     assert env.status() == "queued"
+
+
+def test_claim_takes_nothing_when_the_row_changed_after_it_was_picked(env, monkeypatch):
+    env.use_good_encode()
+    row = env.queue_video()
+    real_probe = worker_module.probe
+
+    def probe_then_scanner_rewrites_row(*args):
+        result = real_probe(*args)
+        env.db.upsert_file(env.library.id, row.path, row.size + 1, row.mtime, "queued")
+        return result
+
+    monkeypatch.setattr(worker_module, "probe", probe_then_scanner_rewrites_row)
+    env.worker.process_one()
+    assert env.status() == "queued"
+    assert env.encodes == 0
+    assert env.db.file_details(row.id)["runs"] == []

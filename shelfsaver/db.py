@@ -76,6 +76,13 @@ RUN_FIELDS = {
 RUN_COLUMNS = ["id", "file_id", *sorted(RUN_FIELDS)]
 
 
+NOT_OWNED = (
+    "files.status NOT IN ('working','waiting_in_use') AND NOT EXISTS ("
+    "SELECT 1 FROM runs WHERE runs.file_id=files.id"
+    " AND runs.state IN ('swapping','waiting_in_use'))"
+)
+
+
 def _library(row: sqlite3.Row) -> Library:
     return Library(
         id=row["id"], name=row["name"], path=row["path"], level=row["level"],
@@ -190,6 +197,50 @@ class Database:
              resolution, time.time()),
         )
         return self.get_file_by_path(path)
+
+    def upsert_file_unless_owned(
+        self, library_id: int, path: str, size: int, mtime: float, status: str,
+        reason: Optional[str] = None, codec: Optional[str] = None,
+        container: Optional[str] = None, resolution: Optional[str] = None,
+    ) -> bool:
+        """Like upsert_file, but one statement that changes nothing a worker owns.
+
+        Returns whether the row was written.
+        """
+        cur = self._exec(
+            "INSERT INTO files(library_id, path, size, mtime, status, reason, codec,"
+            " container, resolution, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(path) DO UPDATE SET library_id=excluded.library_id,"
+            " size=excluded.size, mtime=excluded.mtime, status=excluded.status,"
+            " reason=excluded.reason, codec=COALESCE(excluded.codec, codec),"
+            " container=COALESCE(excluded.container, container),"
+            " resolution=COALESCE(excluded.resolution, resolution),"
+            " updated_at=excluded.updated_at WHERE " + NOT_OWNED,
+            (library_id, path, size, mtime, status, reason, codec, container,
+             resolution, time.time()),
+        )
+        return cur.rowcount > 0
+
+    def set_missing_unless_owned(self, id: int) -> bool:
+        cur = self._exec(
+            "UPDATE files SET status='missing', reason=NULL, updated_at=? WHERE id=? AND "
+            + NOT_OWNED, (time.time(), id))
+        return cur.rowcount > 0
+
+    def claim_file(
+        self, id: int, expected_size: int, expected_mtime: float, size: int, mtime: float,
+        codec: Optional[str] = None, container: Optional[str] = None,
+        resolution: Optional[str] = None,
+    ) -> bool:
+        """Mark a queued row as working, only if it is still queued and unchanged."""
+        cur = self._exec(
+            "UPDATE files SET status='working', reason=NULL, size=?, mtime=?,"
+            " codec=COALESCE(?, codec), container=COALESCE(?, container),"
+            " resolution=COALESCE(?, resolution), updated_at=?"
+            " WHERE id=? AND status='queued' AND size=? AND mtime=?",
+            (size, mtime, codec, container, resolution, time.time(), id,
+             expected_size, expected_mtime))
+        return cur.rowcount > 0
 
     def get_file(self, id: int) -> Optional[FileRow]:
         rows = self._query("SELECT * FROM files WHERE id=?", (id,))

@@ -141,3 +141,48 @@ def test_holding_enabled_defaults_on_until_set(db):
     db.set_setting("holding_enabled", "0")
     assert db.get_setting("holding_enabled") == "0"
     assert db.get_setting("scratch_dir") is None
+
+
+def test_upsert_unless_owned_leaves_a_working_row_alone(tmp_path):
+    db = Database(tmp_path / "t.db")
+    lib = db.add_library("L", str(tmp_path), "high", False)
+    row = db.upsert_file(lib.id, "a.mkv", 1, 1.0, "working", "busy")
+    assert not db.upsert_file_unless_owned(lib.id, "a.mkv", 2, 2.0, "queued")
+    got = db.get_file(row.id)
+    assert (got.status, got.reason, got.size) == ("working", "busy", 1)
+    assert db.upsert_file_unless_owned(lib.id, "new.mkv", 2, 2.0, "queued")
+
+
+def test_upsert_unless_owned_leaves_a_swapping_run_alone(tmp_path):
+    db = Database(tmp_path / "t.db")
+    lib = db.add_library("L", str(tmp_path), "high", False)
+    row = db.upsert_file(lib.id, "a.mkv", 1, 1.0, "failed", "kept")
+    run = db.start_run(row.id, 1, "H.264", None, "why")
+    db.update_run(run.id, state="swapping")
+    assert not db.upsert_file_unless_owned(lib.id, "a.mkv", 2, 2.0, "queued")
+    assert not db.set_missing_unless_owned(row.id)
+    assert db.get_file(row.id).status == "failed"
+
+
+def test_set_missing_unless_owned(tmp_path):
+    db = Database(tmp_path / "t.db")
+    lib = db.add_library("L", str(tmp_path), "high", False)
+    busy = db.upsert_file(lib.id, "a.mkv", 1, 1.0, "working")
+    idle = db.upsert_file(lib.id, "b.mkv", 1, 1.0, "queued")
+    assert not db.set_missing_unless_owned(busy.id)
+    assert db.get_file(busy.id).status == "working"
+    assert db.set_missing_unless_owned(idle.id)
+    assert db.get_file(idle.id).status == "missing"
+
+
+def test_claim_file_needs_a_queued_unchanged_row(tmp_path):
+    db = Database(tmp_path / "t.db")
+    lib = db.add_library("L", str(tmp_path), "high", False)
+    row = db.upsert_file(lib.id, "a.mkv", 10, 1.0, "queued")
+    assert not db.claim_file(row.id, 11, 1.0, 10, 1.0)
+    assert not db.claim_file(row.id, 10, 2.0, 10, 1.0)
+    assert db.get_file(row.id).status == "queued"
+    assert db.claim_file(row.id, 10, 1.0, 12, 3.0, codec="h264")
+    got = db.get_file(row.id)
+    assert (got.status, got.size, got.mtime, got.codec) == ("working", 12, 3.0, "h264")
+    assert not db.claim_file(row.id, 12, 3.0, 12, 3.0)
