@@ -218,6 +218,10 @@ class Database:
         return [_file(r) for r in self._query(
             "SELECT * FROM files WHERE status=? ORDER BY id", (status,))]
 
+    def files_in_library(self, library_id: int) -> list[FileRow]:
+        return [_file(r) for r in self._query(
+            "SELECT * FROM files WHERE library_id=? ORDER BY id", (library_id,))]
+
     def record_converted(
         self, id: int, path: str, size: int, mtime: float, codec: Optional[str],
         container: Optional[str], resolution: Optional[str],
