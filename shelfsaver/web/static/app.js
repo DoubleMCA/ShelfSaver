@@ -839,7 +839,8 @@
           el('h1', { text: lib.name }),
           el('div', { class: 'muted small path' }, lib.path + ' · ',
             lib.status === 'offline' ? el('strong', { text: 'Offline' }) : 'Watching for new files'),
-          el('div', { class: 'muted small', text: fmtSize(lib.stats.saved_bytes) + ' saved · ' +
+          el('div', { class: 'muted small', text: fmtCount(lib.stats.total) + ' total · ' +
+            fmtSize(lib.stats.saved_bytes) + ' saved · ' +
             plural(lib.stats.converted, 'file', 'files') + ' converted · ' + lib.stats.remaining + ' still to do' })),
         el('div', { class: 'libs' },
           el('span', { class: 'pill', text: levelName(lib.level) }),

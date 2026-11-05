@@ -489,7 +489,10 @@ class Database:
         remaining = self._query(
             "SELECT COUNT(*) AS n FROM files WHERE status IN ('queued','working',"
             "'waiting_in_use')" + file_where, args)[0]["n"]
-        return {"saved_bytes": saved, "converted": converted, "remaining": remaining}
+        total = self._query(
+            "SELECT COUNT(*) AS n FROM files WHERE status<>'missing'" + file_where, args)[0]["n"]
+        return {"saved_bytes": saved, "converted": converted, "remaining": remaining,
+                "total": total}
 
 
 def ensure_mcp_token(db: Database) -> str:

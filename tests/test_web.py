@@ -626,6 +626,7 @@ def test_real_worker_and_scanner_behind_the_api(tmp_path):
             time.sleep(0.1)
         assert c.get("/api/status").json()["stats"]["remaining"] == 1
         assert c.get("/api/libraries").json()[0]["stats"]["remaining"] == 1
+        assert c.get("/api/libraries").json()[0]["stats"]["total"] == 1
 
         worker.process_one()  # no scratch disk yet
         status = c.get("/api/status").json()

@@ -77,6 +77,17 @@ def test_stats_survive_library_removal(db, lib):
     assert len(db.history()) == 1
 
 
+def test_stats_count_every_file_still_in_the_library(db, lib):
+    other = db.add_library("Other", "F:\\Other", "medium", False)
+    for name, status in (("a.mkv", "queued"), ("b.mkv", "skipped"), ("c.mkv", "converted"),
+                         ("d.mkv", "failed"), ("gone.mkv", "missing")):
+        db.upsert_file(lib.id, name, 100, 1.0, status)
+    db.upsert_file(other.id, "e.mkv", 100, 1.0, "skipped")
+    assert db.stats(lib.id)["total"] == 4
+    assert db.stats(other.id)["total"] == 1
+    assert db.stats()["total"] == 5
+
+
 def test_settings_round_trip_and_default(db):
     assert db.get_setting("scratch_dir") is None
     db.set_setting("scratch_dir", "E:\\work")
