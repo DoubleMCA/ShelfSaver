@@ -40,9 +40,10 @@ WHOLE_DRIVE = "Choose a folder on the drive, not the whole drive."
 NOT_LOCAL = "Choose a folder on a drive in this PC. Network folders aren't supported."
 STILL_FINISHING = ("A file in this library is still being finished. "
                    "Try again when it's done.")
-HOLDING_BUSY = ("A file is being replaced right now, and a held file can be the only copy "
-                "at this moment. Pause conversions, wait for the current file to finish, "
-                "then try again.")
+HOLDING_BUSY = ("A file is being replaced or finished, and a held file can be the only copy "
+                "right now. If a conversion is in progress, pause it and wait for it to "
+                "stop. If a file is waiting or needs attention, wait for it, or use Try again "
+                "or the resolve action on that file.")
 IN_WORK_FOLDER = ("That folder is inside the ShelfSaver folder that holds files being replaced. "
                   "Choose a different folder.")
 SAFE_HOST = re.compile(r"[A-Za-z0-9.\-]{1,253}(:[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\](:[0-9]{1,5})?")

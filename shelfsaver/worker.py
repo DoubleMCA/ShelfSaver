@@ -249,7 +249,7 @@ class Worker:
         self._parked: Optional[_Job] = None  # converted and verified, waiting for library room
         self._failed_encodes: list[int] = []  # file ids of the current failures in a row
         self._holding_lock = threading.Lock()  # held while holding is cleared or a swap begins
-        self._advancing: Optional[int] = None  # id of the run whose swap is being advanced
+        self._claimed: set[int] = set()  # run ids whose swap is being advanced or resolved
 
     # ---- Controls and status, safe to call from any thread ----
 
@@ -299,27 +299,41 @@ class Worker:
         runs = [r for r in self.db.active_runs(("swapping",)) if r.file_id == file_id]
         if file is None or file.status != "failed" or not runs:
             return "none", None
-        for run in runs:
-            blocker = self._only_copy_may_be_held(run, file)
-            if blocker is not None:
-                return "held", blocker or None
+        ids = {r.id for r in runs}
+        # Claim the runs first, so no attempt can begin or be under way while this decides.
         with self._lock:
-            if self._advancing in {r.id for r in runs}:
+            if self._claimed & ids:
                 return "busy", None
+            self._claimed |= ids
+            for run_id in ids:
+                self._next_swap_try.pop(run_id, None)
+                self._swap_retry_asked.discard(run_id)
+        try:
+            # Read again now that nothing else can change them.
+            runs = [r for r in self.db.active_runs(("swapping",)) if r.id in ids]
+            file = self.db.get_file(file_id)
+            if file is None or file.status != "failed" or not runs:
+                return "none", None
             for run in runs:
-                self._next_swap_try.pop(run.id, None)
-                self._swap_retry_asked.discard(run.id)
-        for run in runs:
-            self._end_run(run.id, "failed", RESOLVED_NOTE)
-        self.db.set_file_status(file_id, "failed", RESOLVED_NOTE)
-        logger.info("The owner marked the kept swap for file %s as handled", file_id)
-        return "resolved", None
+                blocker = self._only_copy_may_be_held(run, file)
+                if blocker is not None:
+                    return "held", blocker or None
+            for run in runs:
+                self._end_run(run.id, "failed", RESOLVED_NOTE)
+            self.db.set_file_status(file_id, "failed", RESOLVED_NOTE)
+            logger.info("The owner marked the kept swap for file %s as handled", file_id)
+            return "resolved", None
+        finally:
+            with self._lock:
+                self._claimed -= ids
 
     def _only_copy_may_be_held(self, run: Run, file: FileRow) -> Optional[str]:
         """The held path (or "" when unknown) if the original is gone while its copy may be in
         the holding folder, otherwise None."""
         try:
             plan = _load_swap(run.swap_json)[0]
+            if plan.holding is not None and not isinstance(plan.holding, str):
+                raise ValueError("The saved plan has a bad holding path")
         except (ValueError, TypeError, KeyError):
             plan = None
         original = plan.original if plan else file.path
@@ -342,7 +356,8 @@ class Worker:
         """
         with self._holding_lock:
             volumes = {os.path.normcase(str(work_root(p))) for p in paths}
-            parked = self._parked.run.id if self._parked is not None else None
+            job = self._parked
+            parked = job.run.id if job is not None else None
             for run in self.db.active_runs(states):
                 if run.id == parked:
                     continue
@@ -799,12 +814,17 @@ class Worker:
 
     def _advance_swap(self, run: Run) -> None:
         with self._lock:
-            self._advancing = run.id
+            if run.id in self._claimed:
+                return  # being resolved, or already being tried
+            self._claimed.add(run.id)
         try:
+            current = self.db.run_record(run.id)
+            if current is None or current["state"] not in SWAP_STATES:
+                return  # it was closed while this attempt was waiting
             self._advance_swap_steps(run)
         finally:
             with self._lock:
-                self._advancing = None
+                self._claimed.discard(run.id)
 
     def _advance_swap_steps(self, run: Run) -> None:
         """Move a saved swap as far as it will go, and record what happened. Never raises for

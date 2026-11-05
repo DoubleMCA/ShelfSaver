@@ -728,16 +728,35 @@ def real_worker_with_library(authed, parts, tmp_path):
     return db, Worker(db, config), folder, lib
 
 
-def test_clear_blocks_the_start_of_a_swap_until_it_is_done(parts, tmp_path, monkeypatch):
+def parked_job(parts, tmp_path, monkeypatch):
+    """A real worker holding a converted file that is waiting for room on the library drive."""
     db, _, scanner, config = parts
     worker = Worker(db, config)
     folder = make_folder(tmp_path, "movies")
-    db.add_library("M", str(folder), "low", True)
+    original = folder / "a.mkv"
+    original.write_bytes(b"ORIGINAL")
+    info = os.stat(original)
+    lib = db.add_library("M", str(folder), "low", True)
+    row = db.upsert_file(lib.id, str(original), info.st_size, info.st_mtime, "working")
+    run = db.start_run(row.id, info.st_size, "H.264", None, "why")
+    scratch = make_folder(tmp_path, "scratch/run")
+    output = scratch / "output.mkv"
+    output.write_bytes(b"NEW")
+    job = worker_module._Job(row, lib, info.st_size, info.st_mtime, None, None, run, scratch,
+                             output)
+    monkeypatch.setattr(worker_module, "free_bytes", lambda path: 0)
+    assert worker._place_new_file(job) is False
+    assert worker._parked is job and db.run_record(run.id)["state"] == "running"
+    return db, worker, job, folder, original
+
+
+def test_clear_blocks_the_start_of_a_swap_until_it_is_done(parts, tmp_path, monkeypatch):
+    db, worker, job, folder, original = parked_job(parts, tmp_path, monkeypatch)
     release, inside = threading.Event(), threading.Event()
 
     def slow_clear(paths):
         inside.set()
-        assert release.wait(5)
+        assert release.wait(10)
         return 7
 
     monkeypatch.setattr(worker_module, "clear_holding", slow_clear)
@@ -746,38 +765,112 @@ def test_clear_blocks_the_start_of_a_swap_until_it_is_done(parts, tmp_path, monk
         worker.clear_holding_when_idle([str(folder)], ("running", "swapping"))))
     clearer.start()
     assert inside.wait(5)
-    started = threading.Event()
-
-    def begin_swap():
-        with worker._holding_lock:
-            started.set()
-
-    starter = threading.Thread(target=begin_swap)
-    starter.start()
-    assert not started.wait(0.3)  # the swap's transition waits for the clear
+    # Room appears, and the real step that begins the swap tries to go ahead.
+    monkeypatch.setattr(worker_module, "free_bytes", lambda path: 10 ** 12)
+    placing = threading.Thread(target=lambda: worker._place_new_file(job))
+    placing.start()
+    placing.join(1.0)
+    assert placing.is_alive()  # waiting for the clear
+    assert db.run_record(job.run.id)["state"] == "running"
+    assert original.read_bytes() == b"ORIGINAL"
     release.set()
-    clearer.join(5)
-    starter.join(5)
-    assert started.is_set() and result == [7]
+    clearer.join(10)
+    placing.join(20)
+    assert result == [7] and not placing.is_alive()
+    assert db.run_record(job.run.id)["state"] == "done"
+    assert original.read_bytes() == b"NEW"
 
 
-def test_swap_transition_takes_the_holding_lock():
-    lines = [ln.strip() for ln in inspect.getsource(Worker._place_new_file).splitlines()]
-    at = next(i for i, ln in enumerate(lines) if ln.startswith("self.db.update_run(job.run.id,"))
-    assert 'state="swapping"' in lines[at] and lines[at - 1] == "with self._holding_lock:"
-
-
-def test_clear_refused_for_a_running_run_but_not_a_parked_one(authed, parts, tmp_path):
-    db, worker, folder, lib = real_worker_with_library(authed, parts, tmp_path)
+def test_a_parked_run_does_not_block_the_clear_but_a_running_one_does(
+        parts, tmp_path, monkeypatch):
+    db, worker, job, folder, original = parked_job(parts, tmp_path, monkeypatch)
     held = hold_a_file(folder)
-    f = db.upsert_file(lib["id"], str(folder / "a.mkv"), 1, 1.0, "working")
-    run = db.start_run(f.id, 1, "H.264", None, "why")
     paths = [str(folder)]
-    assert worker.clear_holding_when_idle(paths, ("running", "swapping")) is None
-    assert held.exists()
-    worker._parked = SimpleNamespace(run=run)
     assert worker.clear_holding_when_idle(paths, ("running", "swapping")) == 2048
     assert not held.exists()
+    worker._parked = None  # the same run, no longer parked, is converting
+    held = hold_a_file(folder)
+    assert worker.clear_holding_when_idle(paths, ("running", "swapping")) is None
+    assert held.exists()
+
+
+def test_clear_ignores_a_parked_job_that_vanishes_mid_check(parts, tmp_path, monkeypatch):
+    db, worker, job, folder, original = parked_job(parts, tmp_path, monkeypatch)
+    real_active = db.active_runs
+
+    def active(states):
+        worker._parked = None  # the worker drops it between the checks
+        return real_active(states)
+
+    monkeypatch.setattr(db, "active_runs", active)
+    assert worker.clear_holding_when_idle([str(folder)], ("running",)) == 0  # it read the job once, so it is still treated as parked
+
+
+def attempt_that_waits(worker, db, run, finish_state=None):
+    """Start an attempt on `run` that stays under way until released."""
+    started, release = threading.Event(), threading.Event()
+
+    def steps(r):
+        started.set()
+        assert release.wait(10)
+        if finish_state:
+            db.update_run(r.id, state=finish_state)
+
+    worker._advance_swap_steps = steps
+    thread = threading.Thread(target=lambda: worker._advance_swap(run))
+    thread.start()
+    assert started.wait(5)
+    return thread, release
+
+
+def test_resolve_does_nothing_while_an_attempt_is_under_way(tmp_path):
+    db, worker, f, run, original, held = kept_swap(tmp_path, True, True)
+    thread, release = attempt_that_waits(worker, db, db.active_runs(("swapping",))[0], "done")
+    assert worker.resolve_swap(f.id) == ("busy", None)
+    assert db.run_record(run.id)["state"] == "swapping"
+    release.set()
+    thread.join(5)
+    # The attempt finished the swap; the later answer must not overwrite it.
+    assert db.run_record(run.id)["state"] == "done"
+    assert worker.resolve_swap(f.id) == ("none", None)
+    assert db.run_record(run.id)["state"] == "done"
+
+
+def test_an_attempt_cannot_start_during_a_resolve_or_after_it(tmp_path):
+    db, worker, f, run, original, held = kept_swap(tmp_path, True, True)
+    stale = db.active_runs(("swapping",))[0]
+    attempted = []
+    worker._advance_swap_steps = lambda r: attempted.append(r.id)
+    inside, release = threading.Event(), threading.Event()
+    real_check = worker._only_copy_may_be_held
+
+    def slow_check(r, file):
+        inside.set()
+        assert release.wait(10)
+        return real_check(r, file)
+
+    worker._only_copy_may_be_held = slow_check
+    outcome = []
+    resolver = threading.Thread(target=lambda: outcome.append(worker.resolve_swap(f.id)))
+    resolver.start()
+    assert inside.wait(5)
+    worker._advance_swap(stale)  # a retry that was already picked up
+    assert attempted == []
+    release.set()
+    resolver.join(5)
+    assert outcome == [("resolved", None)]
+    worker._advance_swap(stale)  # and one with the old record, after the resolve
+    assert attempted == []
+
+
+def test_a_plan_with_a_bad_holding_field_counts_as_unreadable(tmp_path):
+    db, worker, f, run, original, held = kept_swap(tmp_path, False, True)
+    broken = json.loads(db.run_record(run.id)["swap_json"])
+    broken["holding"] = 12345
+    db.update_run(run.id, swap_json=json.dumps(broken))
+    assert worker.resolve_swap(f.id) == ("held", None)
+    original.write_bytes(b"back")
+    assert worker.resolve_swap(f.id) == ("resolved", None)
 
 
 def test_clear_ignores_runs_on_other_volumes(parts, tmp_path, monkeypatch):
@@ -801,7 +894,7 @@ def test_busy_message_suggests_pausing(authed, parts, tmp_path):
     f = db.upsert_file(lib["id"], str(tmp_path / "movies" / "a.mkv"), 1, 1.0, "working")
     db.start_run(f.id, 1, "H.264", None, "why")
     r = authed.post("/api/holding/clear", json={"confirm": True})
-    assert r.status_code == 400 and "Pause" in r.json()["detail"]
+    assert r.status_code == 400 and "pause it" in r.json()["detail"]
 
 
 def test_library_and_scratch_cannot_be_inside_the_work_folder(authed, tmp_path):
