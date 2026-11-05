@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>ShelfSaver</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="home">
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="/">ShelfSaver</a>
+    <nav class="top-links" aria-label="Main">
+      <a href="/" aria-current="page">Home</a>
+      <a href="/settings">Settings</a>
+      <button id="pause" type="button" class="small" hidden>Pause</button>
+    </nav>
+  </header>
+  <div id="offline" class="floating" role="status" hidden>Can't reach ShelfSaver. Trying again&hellip;</div>
+  <div id="message" role="status"></div>
+  <section id="first-run" class="card" hidden>
+    <h1>One quick step first</h1>
+    <p>ShelfSaver needs a scratch disk: a drive with plenty of free space where it can work on one file at a time. Nothing is converted until you choose one.</p>
+    <a class="button primary" href="/settings">Choose a scratch disk in Settings</a>
+  </section>
+  <section class="stats" aria-label="Totals">
+    <div class="stat hero"><b id="stat-saved">&ndash;</b><span>Space saved</span></div>
+    <div class="stat"><b id="stat-converted">&ndash;</b><span>Files converted</span></div>
+    <div class="stat"><b id="stat-remaining">&ndash;</b><span>Still to do</span></div>
+  </section>
+  <section id="now" class="card" aria-live="polite"></section>
+  <h2>Libraries</h2>
+  <div class="libs" id="libs"></div>
+  <h2 id="history-title">History</h2>
+  <div id="history"></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

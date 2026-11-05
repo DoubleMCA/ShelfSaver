@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Sign in - ShelfSaver</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="login">
+<div class="wrap narrow">
+  <header class="top"><span class="brand">ShelfSaver</span></header>
+  <div id="offline" class="floating" role="status" hidden>Can't reach ShelfSaver. Trying again&hellip;</div>
+  <form id="login-form" class="card" novalidate>
+    <h1 id="login-title">Sign in</h1>
+    <p id="login-help" class="muted"></p>
+    <div class="field-row">
+      <label class="field" for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+    </div>
+    <div class="field-row" id="again-row" hidden>
+      <label class="field" for="password2">Type it again</label>
+      <input id="password2" type="password" autocomplete="new-password">
+    </div>
+    <p id="login-error" class="err" role="alert" hidden></p>
+    <button id="login-go" class="primary" type="submit">Sign in</button>
+  </form>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

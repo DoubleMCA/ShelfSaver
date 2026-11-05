@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Library - ShelfSaver</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="library">
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="/">ShelfSaver</a>
+    <nav class="top-links" aria-label="Main">
+      <a href="/">Home</a>
+      <a href="/settings">Settings</a>
+      
+    </nav>
+  </header>
+  <div id="offline" class="floating" role="status" hidden>Can't reach ShelfSaver. Trying again&hellip;</div>
+  <div id="library-head" class="lib-head"></div>
+  <div id="message" role="status"></div>
+  <div class="filters" id="filters" role="group" aria-label="Show"></div>
+  <div id="history"></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

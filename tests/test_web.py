@@ -958,3 +958,34 @@ def test_second_instance_is_refused_and_a_dead_one_does_not_block(tmp_path):
         time.sleep(0.1)
     assert after is not None
     after.close()
+
+
+# ---- web pages
+
+STATIC = Path(__file__).resolve().parent.parent / "shelfsaver" / "web" / "static"
+
+
+@pytest.mark.parametrize("route,marker", [
+    ("/", "history"), ("/library", "library"), ("/settings", "Settings"), ("/login", "password")])
+def test_pages_are_served(client, route, marker):
+    # The pages carry no private data, so they load before sign-in; the data calls need it.
+    response = client.get(route)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert marker in response.text
+    assert "/static/app.js" in response.text
+    for asset in ("/static/app.js", "/static/style.css"):
+        assert client.get(asset).status_code == 200
+
+
+def test_no_inner_html_in_app_js():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "innerHTML" not in app_js
+    assert "outerHTML" not in app_js
+    assert "insertAdjacentHTML" not in app_js
+
+
+def test_pages_need_no_internet():
+    for page in STATIC.glob("*.html"):
+        text = page.read_text(encoding="utf-8")
+        assert "http://" not in text and "https://" not in text, page.name

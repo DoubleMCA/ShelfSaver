@@ -16,6 +16,9 @@ dev = ["pytest", "httpx"]
 [tool.setuptools.packages.find]
 include = ["shelfsaver*"]
 
+[tool.setuptools.package-data]
+"shelfsaver.web" = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["gpu: needs an NVIDIA GPU with NVENC"]

@@ -13,11 +13,13 @@ import string
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, StrictBool
 
 from .. import swap
@@ -33,6 +35,9 @@ LOGIN_WINDOW_SECONDS = 60.0
 LEVELS = ("low", "medium", "high")
 ACTIVE_RUN_STATES = ("running", "swapping", "waiting_in_use")
 MAX_PAGE = 500
+STATIC_DIR = Path(__file__).parent / "static"
+PAGES = {"/": "index.html", "/library": "library.html", "/settings": "settings.html",
+         "/login": "login.html"}
 DRIVE_REMOTE = 4
 HIDDEN_OR_SYSTEM = 0x2 | 0x4  # FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
 
@@ -229,6 +234,15 @@ def _parsed(text: Optional[str]) -> Any:
         return None
 
 
+class _FreshStaticFiles(StaticFiles):
+    """Serve the page scripts so the browser always checks for a newer copy after an update."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def create_app(db, worker, scanner, config) -> FastAPI:
     app = FastAPI(title="ShelfSaver", docs_url=None, redoc_url=None, openapi_url=None)
     limiter = LoginLimiter()
@@ -399,6 +413,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                 "library": names.get(run["library_id"]),
                 "name": os.path.basename(path.replace("\\", "/")) if path else "",
                 "path": path,
+                "now_path": run["now_path"],
                 "state": run["state"],
                 # The file's own status and reason say what is true now; a run that was only
                 # interrupted or paused is not a failure.
@@ -611,4 +626,17 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     app.include_router(open_api)
     app.include_router(api)
+
+    # The pages hold no private data, so they load before sign-in. Their script asks the API
+    # for everything and sends the visitor to /login when the API says 401.
+    def page_route(file_name: str):
+        def serve() -> FileResponse:
+            return FileResponse(STATIC_DIR / file_name, media_type="text/html",
+                                headers={"Cache-Control": "no-cache"})
+        return serve
+
+    for route, file_name in PAGES.items():
+        app.add_api_route(route, page_route(file_name), methods=["GET"],
+                          include_in_schema=False)
+    app.mount("/static", _FreshStaticFiles(directory=STATIC_DIR), name="static")
     return app
