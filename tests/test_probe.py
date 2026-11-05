@@ -163,3 +163,12 @@ def test_scan_streams_tolerance_for_damaged_file(tmp_path):
     with pytest.raises(ProbeError):
         scan_streams(path, "ffprobe", strict=True)
     assert scan_streams(path, "ffprobe", strict=False)
+
+
+def test_scan_streams_ties_ffprobe_to_the_app(tmp_path, monkeypatch):
+    from shelfsaver import probe as probe_module
+    tied = []
+    monkeypatch.setattr(probe_module, "kill_with_app", lambda proc: tied.append(proc.pid))
+    path = make_video(tmp_path / "a.mkv", seconds=1, size="320x180")
+    assert probe_module.scan_streams(path, "ffprobe")
+    assert len(tied) == 1

@@ -9,6 +9,7 @@ from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
+from .jobobject import kill_with_app
 from .models import MediaInfo, Stream
 
 
@@ -205,6 +206,7 @@ def scan_streams(path, ffprobe, should_stop=lambda: False, strict=True) -> dict:
                                 stderr=subprocess.PIPE, creationflags=flags)
     except OSError as exc:
         raise ProbeError(f"Could not read file: {exc}") from exc
+    kill_with_app(proc)
     errors = bytearray()
 
     def drain():

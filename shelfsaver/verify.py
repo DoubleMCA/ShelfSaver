@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from .jobobject import kill_with_app
 from .models import Decision, MediaInfo, VerifyResult
 from .probe import ProbeError, ScanStopped, probe, scan_streams
 from .quality import MIN_SAVINGS
@@ -127,6 +128,7 @@ def _plays(output: Path, video_index: int, ffmpeg, should_stop: Callable[[], boo
                                 stderr=subprocess.PIPE, creationflags=flags)
     except OSError:
         return False
+    kill_with_app(proc)
     seen = bytearray()
 
     def drain():

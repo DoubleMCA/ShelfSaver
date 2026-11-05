@@ -372,3 +372,12 @@ def test_truncated_output_is_never_excused_as_not_worth_it(tmp_path):
     src = dataclasses.replace(_src(tmp_path, seconds=10), size=10_000_000)
     r = verify_output(src, _out(tmp_path, seconds=5), convert(), "ffmpeg", "ffprobe")
     assert r.checks["smaller"] and not r.not_worth_it and r.checks["length"] is False
+
+
+def test_full_decode_is_tied_to_the_app(tmp_path, monkeypatch):
+    from shelfsaver import verify as v
+    tied = []
+    monkeypatch.setattr(v, "kill_with_app", lambda proc: tied.append(proc.pid))
+    path = make_video(tmp_path / "a.mkv", seconds=1, size="320x180")
+    assert v._plays(path, 0, "ffmpeg", lambda: False) is True
+    assert len(tied) == 1

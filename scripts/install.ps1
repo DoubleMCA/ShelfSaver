@@ -90,15 +90,17 @@ function Get-AppProcessIds {
 
 function Stop-ShelfSaver {
     # Disable first so Windows can't restart it while we work; callers re-enable when done.
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Disable-ScheduledTask -TaskName $TaskName | Out-Null
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    }
+    $hasTask = [bool](Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+    if ($hasTask) { Disable-ScheduledTask -TaskName $TaskName | Out-Null }
+    # End the whole process tree first, from the launcher in the program folder (the real
+    # interpreter lives in the base Python folder). Stopping the task first could kill the launcher
+    # and leave its children running with no way to find them.
     $ids = Get-AppProcessIds
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    foreach ($id in $ids) { & taskkill.exe /PID $id /T /F 2>&1 | Out-Null }   # /T also ends its ffmpeg
+    foreach ($id in $ids) { & taskkill.exe /PID $id /T /F 2>&1 | Out-Null }   # already gone is fine
     $ErrorActionPreference = $previous
+    if ($hasTask) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue }
     for ($i = 0; $i -lt 30; $i++) {
         if ((Get-AppProcessIds).Count -eq 0) { return }
         Start-Sleep -Seconds 1
@@ -122,13 +124,26 @@ function Remove-Directory($path) {
     if (Test-Path -LiteralPath $path) { Fail "Could not remove the folder $path. Close anything using it and try again." }
 }
 
+function Test-PortOpen {
+    $client = New-Object Net.Sockets.TcpClient
+    try { $client.Connect('127.0.0.1', $Port); return $true } catch { return $false } finally { $client.Close() }
+}
+
 function Wait-ForPort([int]$seconds) {
     for ($i = 0; $i -lt $seconds; $i++) {
-        $client = New-Object Net.Sockets.TcpClient
-        try { $client.Connect('127.0.0.1', $Port); return $true } catch { } finally { $client.Close() }
+        if (Test-PortOpen) { return $true }
+        if ($i -gt 0 -and $i % 10 -eq 0) { Say "Still waiting for ShelfSaver to start ($i seconds)..." }
         Start-Sleep -Seconds 1
     }
     return $false
+}
+
+function Rename-WithRetry([string]$from, [string]$newName) {
+    # A just-stopped program can hold a folder for a few seconds.
+    for ($i = 0; $i -lt 10; $i++) {
+        try { Rename-Item -LiteralPath $from -NewName $newName -ErrorAction Stop; return }
+        catch { if ($i -eq 9) { throw }; Start-Sleep -Seconds 1 }
+    }
 }
 
 # --- Uninstall ---------------------------------------------------------------------------------
@@ -331,8 +346,10 @@ $script:succeeded = $false
 
 try {
     # Leftovers from a run that was cut off. If the swap was interrupted, put the old version back.
-    if (-not (Test-Path -LiteralPath $AppDir) -and (Test-Path -LiteralPath $OldDir)) {
-        Rename-Item -LiteralPath $OldDir -NewName (Split-Path -Leaf $AppDir)
+    $oldIsComplete = Test-Path -LiteralPath (Join-Path $OldDir 'venv\Scripts\python.exe')
+    if ($oldIsComplete -and -not (Test-Path -LiteralPath $VenvPython)) {
+        if (Test-Path -LiteralPath $AppDir) { Remove-Directory $AppDir }   # half-built, nothing to keep
+        Rename-WithRetry $OldDir (Split-Path -Leaf $AppDir)
     }
     Remove-Directory $NewDir
     Remove-Directory $OldDir
@@ -356,7 +373,7 @@ try {
 
     $config = New-Object PSObject
     if (Test-Path -LiteralPath $ConfigPath) {
-        $script:configBackup = Get-Content -LiteralPath $ConfigPath -Raw
+        $script:configBackup = [IO.File]::ReadAllText($ConfigPath, (New-Object Text.UTF8Encoding($false)))
         try {
             $existing = $script:configBackup | ConvertFrom-Json
             if ($existing -is [PSCustomObject]) { $config = $existing } else { Fail 'not settings' }
@@ -406,11 +423,19 @@ try {
 
     Step 'Switching to the new version'
     Stop-ShelfSaver
+    if (Test-PortOpen) {
+        $owner = ''
+        try {
+            $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1
+            $owner = ' (' + (Get-Process -Id $conn.OwningProcess -ErrorAction Stop).ProcessName + ')'
+        } catch { }
+        Fail "Port $Port is already being used by another program$owner, for example a development copy of ShelfSaver. Close it, then run setup again."
+    }
     if (Test-Path -LiteralPath $AppDir) {
-        Rename-Item -LiteralPath $AppDir -NewName (Split-Path -Leaf $OldDir)
+        Rename-WithRetry $AppDir (Split-Path -Leaf $OldDir)
         $script:oldMoved = $true
     }
-    Rename-Item -LiteralPath $NewDir -NewName (Split-Path -Leaf $AppDir)
+    Rename-WithRetry $NewDir (Split-Path -Leaf $AppDir)
     $script:newInPlace = $true
     if (-not (Test-SystemRuns $VenvPython -PyCode $ImportCheck)) {
         Fail 'The new version could not start from its final folder.'
@@ -427,14 +452,16 @@ try {
     $action = New-ScheduledTaskAction -Execute ('"{0}"' -f $VenvPython) -Argument '-m shelfsaver' -WorkingDirectory $AppDir
     $trigger = New-ScheduledTaskTrigger -AtStartup
     # Also check every 5 minutes: if the app has stopped it comes back, and if it is running the
-    # new start is ignored (and the app refuses a second copy anyway).
-    $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
-        -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 9999)).Repetition
+    # new start is ignored (and the app refuses a second copy anyway). The startup trigger's
+    # repeat only begins at the next boot, so a second trigger starts the repeat right away.
+    $nowTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 9999)
+    $trigger.Repetition = $nowTrigger.Repetition
     $who = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $who `
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($trigger, $nowTrigger) -Principal $who `
         -Settings $settings -Description 'ShelfSaver: converts video libraries to save space.' -Force | Out-Null
     Say 'Done.'
 
@@ -449,10 +476,16 @@ try {
     Step 'Starting ShelfSaver'
     Start-ScheduledTask -TaskName $TaskName
     if (-not (Wait-ForPort 90)) { Fail 'The new version did not start.' }
+    # Something else could be answering on the port, so also confirm the installed app is alive.
+    Start-Sleep -Seconds 3
+    $alive = ((Get-AppProcessIds).Count -gt 0) -and
+        ((Get-ScheduledTask -TaskName $TaskName).State -eq 'Running') -and (Test-PortOpen)
+    if (-not $alive) { Fail 'The new version started and then stopped again.' }
 
-    # Only now is the old version no longer needed.
-    Remove-Directory $OldDir
+    # The new version works; from here on nothing may undo it.
     $script:succeeded = $true
+    try { Remove-Directory $OldDir }
+    catch { Warn "Could not delete the old copy in $OldDir. It is harmless and will be removed next time setup runs." }
 } catch {
     $script:failure = $_.Exception.Message
 }
@@ -464,7 +497,7 @@ if (-not $script:succeeded) {
         if ($script:newInPlace -or $script:oldMoved) {
             Stop-ShelfSaver
             if ($script:newInPlace) { Remove-Directory $AppDir }
-            if ($script:oldMoved) { Rename-Item -LiteralPath $OldDir -NewName (Split-Path -Leaf $AppDir) }
+            if ($script:oldMoved) { Rename-WithRetry $OldDir (Split-Path -Leaf $AppDir) }
             if ($script:configWritten) {
                 if ($null -ne $script:configBackup) {
                     [IO.File]::WriteAllText($ConfigPath, $script:configBackup, (New-Object Text.UTF8Encoding($false)))

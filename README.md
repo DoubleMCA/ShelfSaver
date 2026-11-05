@@ -42,6 +42,19 @@ This stops ShelfSaver and removes the startup task, the firewall rule and the pr
 Your settings and history are kept. To delete those too, add `-RemoveData`. Your video
 libraries, holding folders and scratch disks are never touched.
 
+## Stopping ShelfSaver
+
+ShelfSaver restarts itself if it is stopped (and checks every few minutes), so ending the task in
+Task Manager will not keep it stopped. To stop it until you want it back, in PowerShell as
+administrator:
+
+```powershell
+Disable-ScheduledTask -TaskName ShelfSaver
+Stop-ScheduledTask -TaskName ShelfSaver
+```
+
+To turn it back on: `Enable-ScheduledTask -TaskName ShelfSaver` then `Start-ScheduledTask -TaskName ShelfSaver`.
+
 ## Compare quality before you commit
 
 To see Low, Medium and High on your own TV, make short clips from one of your files. The
