@@ -49,7 +49,7 @@ installer puts the tool at `C:\Program Files\ShelfSaver\scripts\make_compare_cli
 PowerShell as administrator, so it uses the same FFmpeg that ShelfSaver does:
 
 ```powershell
-& "C:\Program Files\ShelfSaverenv\Scripts\python.exe" "C:\Program Files\ShelfSaver\scripts\make_compare_clips.py" --source "D:\Media\Movies\Example.mkv" --start 600 --seconds 30 --out "D:\Clips"
+& "C:\Program Files\ShelfSaver\venv\Scripts\python.exe" "C:\Program Files\ShelfSaver\scripts\make_compare_clips.py" --source "D:\Media\Movies\Example.mkv" --start 600 --seconds 30 --out "D:\Clips"
 ```
 
 (From a development copy of this folder, `scripts\make_compare_clips.py` works the same way.)
