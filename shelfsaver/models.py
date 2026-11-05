@@ -60,3 +60,41 @@ class Run:
     error: Optional[str] = None
     log_tail: Optional[str] = None
     saved_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class Stream:
+    index: int
+    kind: str  # video | audio | subtitle | attachment | data
+    codec: Optional[str] = None
+    language: Optional[str] = None
+    title: Optional[str] = None
+    is_default: bool = False
+    is_cover_art: bool = False
+
+
+@dataclass(frozen=True)
+class MediaInfo:
+    path: str
+    size: int
+    duration: float
+    ext: str
+    video_codec: Optional[str]
+    width: int
+    height: int
+    video_bitrate: Optional[int]
+    bit_depth: Optional[int]
+    color_transfer: Optional[str]
+    color_primaries: Optional[str]
+    colorspace: Optional[str]
+    field_order: Optional[str]
+    dolby_vision: bool
+    streams: tuple = ()
+
+
+@dataclass(frozen=True)
+class Decision:
+    action: str  # convert | strip_only | skip
+    reason: str
+    remove_audio: tuple = ()
+    why: str = ""

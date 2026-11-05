@@ -18,3 +18,4 @@ include = ["shelfsaver*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["gpu: needs an NVIDIA GPU with NVENC"]

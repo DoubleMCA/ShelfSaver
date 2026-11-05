@@ -1,0 +1,149 @@
+"""Read a media file with ffprobe."""
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+from .models import MediaInfo, Stream
+
+
+class ProbeError(Exception):
+    """The file is unreadable or has no usable duration."""
+
+
+def _int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+
+def _float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _kind(raw: dict) -> str:
+    kind = raw.get("codec_type")
+    return kind if kind in ("video", "audio", "subtitle", "attachment") else "data"
+
+
+def _tags(raw: dict) -> dict:
+    return {str(k).lower(): v for k, v in (raw.get("tags") or {}).items()}
+
+
+def _is_cover_art(raw: dict, kind: str) -> bool:
+    if (raw.get("disposition") or {}).get("attached_pic"):
+        return True
+    if kind == "attachment":
+        return str(_tags(raw).get("mimetype", "")).lower().startswith("image/")
+    return False
+
+
+def _bit_depth(raw: dict):
+    depth = _int(raw.get("bits_per_raw_sample"))
+    if depth:
+        return depth
+    pix = raw.get("pix_fmt") or ""
+    for d in (16, 14, 12, 10, 9):
+        if f"p{d}" in pix:
+            return d
+    return 8 if pix else None
+
+
+def _has_dovi(raw: dict) -> bool:
+    return any(
+        "DOVI configuration record" in str(sd.get("side_data_type", ""))
+        for sd in raw.get("side_data_list") or []
+    )
+
+
+def _stream_bitrate(raw: dict):
+    br = _int(raw.get("bit_rate"))
+    if br:
+        return br
+    return _int(_tags(raw).get("bps")) or None
+
+
+def parse_probe(data: dict, path, size: int) -> MediaInfo:
+    """Build a MediaInfo from ffprobe JSON output."""
+    raws = data.get("streams") or []
+    duration = _float((data.get("format") or {}).get("duration"))
+    if not duration:
+        duration = max((_float(r.get("duration")) or 0.0 for r in raws), default=0.0)
+    if not duration or duration <= 0:
+        raise ProbeError("File has no duration")
+
+    streams = []
+    main = None
+    audio_rates = []
+    for pos, raw in enumerate(raws):
+        kind = _kind(raw)
+        tags = _tags(raw)
+        cover = _is_cover_art(raw, kind)
+        index = _int(raw.get("index"))
+        streams.append(Stream(
+            index=pos if index is None else index,
+            kind=kind,
+            codec=raw.get("codec_name"),
+            language=tags.get("language"),
+            title=tags.get("title"),
+            is_default=bool((raw.get("disposition") or {}).get("default")),
+            is_cover_art=cover,
+        ))
+        if kind == "video" and not cover and main is None:
+            main = raw
+        if kind == "audio":
+            audio_rates.append(_stream_bitrate(raw))
+
+    video_bitrate = None
+    if main is not None:
+        video_bitrate = _stream_bitrate(main)
+        if not video_bitrate:
+            estimate = size * 8 / duration - sum(r for r in audio_rates if r)
+            video_bitrate = int(estimate) if estimate > 0 else None
+
+    m = main or {}
+    return MediaInfo(
+        path=str(path),
+        size=size,
+        duration=duration,
+        ext=Path(path).suffix.lower(),
+        video_codec=m.get("codec_name"),
+        width=_int(m.get("width")) or 0,
+        height=_int(m.get("height")) or 0,
+        video_bitrate=video_bitrate,
+        bit_depth=_bit_depth(m) if main else None,
+        color_transfer=m.get("color_transfer"),
+        color_primaries=m.get("color_primaries"),
+        colorspace=m.get("color_space"),
+        field_order=m.get("field_order"),
+        dolby_vision=_has_dovi(m),
+        streams=tuple(streams),
+    )
+
+
+def probe(path, ffprobe) -> MediaInfo:
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+        proc = subprocess.run(
+            [str(ffprobe), "-v", "error", "-print_format", "json",
+             "-show_format", "-show_streams", str(path)],
+            capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProbeError(f"Could not read file: {exc}") from exc
+    if proc.returncode != 0:
+        raise ProbeError("File could not be read")
+    try:
+        data = json.loads(proc.stdout.decode("utf-8", "replace"))
+    except ValueError as exc:
+        raise ProbeError("File could not be read") from exc
+    return parse_probe(data, path, size)
