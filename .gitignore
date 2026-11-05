@@ -1,0 +1,38 @@
+# Never synced to GitHub
+docs/
+.superpowers/
+superpowers/
+.private-terms
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Runtime data
+*.db
+*.db-*
+*.log
+logs/
+config.json
+.env
+
+# Media
+*.mkv
+*.mp4
+*.m4v
+*.avi
+*.mov
+*.wmv
+*.mpg
+*.mpeg
+*.ts
+*.m2ts
+*.vob
+*.flv
+*.asf
+*.webm
