@@ -1,6 +1,7 @@
 """SQLite storage: one connection per thread, WAL mode."""
 from __future__ import annotations
 
+import secrets
 import sqlite3
 import threading
 import time
@@ -62,6 +63,10 @@ CREATE INDEX IF NOT EXISTS idx_runs_file ON runs(file_id);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    expires_at REAL NOT NULL
 );
 """
 
@@ -177,6 +182,27 @@ class Database:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+
+    def set_setting_if_absent(self, key: str, value: str) -> bool:
+        """Store a setting only if there is none yet. Returns whether this call stored it."""
+        cur = self._exec(
+            "INSERT INTO settings(key, value) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+            (key, value),
+        )
+        return cur.rowcount > 0
+
+    # sessions: only a hash of each token is stored
+    def add_session(self, token_hash: str, expires_at: float) -> None:
+        self._exec("DELETE FROM sessions WHERE expires_at<=?", (time.time(),))
+        self._exec("INSERT OR REPLACE INTO sessions(token_hash, expires_at) VALUES (?,?)",
+                   (token_hash, expires_at))
+
+    def session_expiry(self, token_hash: str) -> Optional[float]:
+        rows = self._query("SELECT expires_at FROM sessions WHERE token_hash=?", (token_hash,))
+        return rows[0]["expires_at"] if rows else None
+
+    def delete_session(self, token_hash: str) -> None:
+        self._exec("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
 
     # files
     def upsert_file(
@@ -372,3 +398,9 @@ class Database:
             "SELECT COUNT(*) AS n FROM files WHERE status IN ('queued','working',"
             "'waiting_in_use')" + file_where, args)[0]["n"]
         return {"saved_bytes": saved, "converted": converted, "remaining": remaining}
+
+
+def ensure_mcp_token(db: Database) -> str:
+    """Return the token that guards the MCP endpoint, creating it on first use."""
+    db.set_setting_if_absent("mcp_token", secrets.token_urlsafe(32))
+    return db.get_setting("mcp_token")

@@ -73,6 +73,8 @@ TARGET_TAKEN = "A different file is already where the new file needs to go"
 LOCKED_NOTE = "The file is in use, so it will be tried again"
 STOPPED_NOTE = "Stopped before finishing, so it will start again"
 INTERRUPTED_NOTE = "Interrupted by a restart, so it will start again"
+RESOLVED_NOTE = ("Marked as handled by you. Nothing was deleted or moved. Any leftover files "
+                 "are in the ShelfSaver folder on this drive.")
 CHANGED_NOTE = "The original changed during the conversion, so it will start again"
 
 _FORMAT_NAMES = {
@@ -245,6 +247,7 @@ class Worker:
         self._swap_retry_asked: set[int] = set()  # run ids the owner asked to try now
         self._parked: Optional[_Job] = None  # converted and verified, waiting for library room
         self._failed_encodes: list[int] = []  # file ids of the current failures in a row
+        self._advancing: Optional[int] = None  # id of the run whose swap is being advanced
 
     # ---- Controls and status, safe to call from any thread ----
 
@@ -281,6 +284,28 @@ class Worker:
             with self._lock:
                 self._next_locked_try.pop(file_id, None)
             self.db.requeue([file_id])
+
+    def resolve_swap(self, file_id: int) -> str:
+        """End a kept swap at the owner's request, without touching any file.
+
+        Returns "resolved", "none" (the file has no kept swap) or "busy" (the swap is being
+        tried right now).
+        """
+        file = self.db.get_file(file_id)
+        runs = [r for r in self.db.active_runs(("swapping",)) if r.file_id == file_id]
+        if file is None or file.status != "failed" or not runs:
+            return "none"
+        with self._lock:
+            if self._advancing in {r.id for r in runs}:
+                return "busy"
+            for run in runs:
+                self._next_swap_try.pop(run.id, None)
+                self._swap_retry_asked.discard(run.id)
+        for run in runs:
+            self._end_run(run.id, "failed", RESOLVED_NOTE)
+        self.db.set_file_status(file_id, "failed", RESOLVED_NOTE)
+        logger.info("The owner marked the kept swap for file %s as handled", file_id)
+        return "resolved"
 
     # ---- Status helpers ----
 
@@ -727,6 +752,15 @@ class Worker:
         return tried
 
     def _advance_swap(self, run: Run) -> None:
+        with self._lock:
+            self._advancing = run.id
+        try:
+            self._advance_swap_steps(run)
+        finally:
+            with self._lock:
+                self._advancing = None
+
+    def _advance_swap_steps(self, run: Run) -> None:
         """Move a saved swap as far as it will go, and record what happened. Never raises for
         anything a swap can report."""
         try:
