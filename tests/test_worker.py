@@ -1512,3 +1512,136 @@ def test_tracks_record_whether_the_picture_is_hdr():
     sdr = json.loads(worker_module._tracks_json(info(streams=eng_spa()), convert()))
     assert hdr["hdr"] is True
     assert sdr["hdr"] is False
+
+
+# ---- how long the conversion itself took
+
+def test_conversion_time_leaves_out_waiting_for_room(env, monkeypatch):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(worker_module, "_now", lambda: clock["now"])
+
+    def slow_encode(cmd, duration, on_progress, should_stop):
+        clock["now"] += 90.0
+        return env._fake_encode(cmd, duration, on_progress, should_stop)
+
+    env.use_encode(slow_encode)
+    env.queue_video()
+    env.free["library"] = 0
+    assert env.worker.process_one() is False  # converted, and now waiting for room
+    clock["now"] += 5000.0
+    env.free["library"] = LOTS_OF_ROOM
+    assert env.worker.process_one() is True
+    run = env.run_row()
+    assert run["state"] == "done" and run["convert_seconds"] == 90.0
+
+
+# ---- a library drive that goes away
+
+def add_other_library(env):
+    other = env.volume / "Media" / "Other"
+    other.mkdir()
+    library = env.db.add_library("Other", str(other), "high", False)
+    return library, source_video(other / "other.mkv", seconds=1)
+
+
+def queue_in(env, library, path):
+    st = os.stat(path)
+    return env.db.upsert_file(library.id, str(path), st.st_size, st.st_mtime, "queued")
+
+
+def test_parked_job_on_a_disconnected_drive_lets_other_libraries_go_on(env):
+    env.queue_video()
+    env.free["library"] = 0
+    assert env.worker.process_one() is False
+    assert env.worker.status()["message"] == "Not enough room on the library drive"
+    run = env.run_row()
+    other_library, other_path = add_other_library(env)
+    other = queue_in(env, other_library, other_path)
+
+    gone = env.tmp_path / "unplugged"
+    shutil.move(str(env.lib), str(gone))
+    assert env.worker.process_one() is True
+    assert env.worker._parked is None
+    assert env.worker.status()["message"] is None
+    assert env.status() == "queued"  # kept in the queue for when the drive is back
+    assert env.db.run_record(run["id"])["state"] == "interrupted"
+    assert "offline" in env.db.run_record(run["id"])["error"]
+    assert not (env.scratch / "ShelfSaver" / f"run-{run['id']}").exists()
+    statuses = {l.name: l.status for l in env.db.list_libraries()}
+    assert statuses == {"Movies": "offline", "Other": "ok"}
+
+    env.free["library"] = LOTS_OF_ROOM
+    assert env.worker.process_one() is True
+    assert env.status(other.id) == "converted"
+    assert env.status() == "queued"  # still not picked while its drive is gone
+
+    shutil.move(str(gone), str(env.lib))
+    assert env.worker.process_one() is True
+    assert env.status() == "converted"
+    assert env.held("movie.mkv").read_bytes() == env.original_bytes
+
+
+def test_library_drive_that_stops_answering_counts_as_offline(env, monkeypatch):
+    env.queue_video()
+    real = env._free_bytes
+
+    def not_ready(path):
+        if Path(path).is_relative_to(env.scratch):
+            return real(path)
+        raise OSError("drive not ready")
+
+    monkeypatch.setattr(worker_module, "free_bytes", not_ready)
+    assert env.worker.process_one() is True
+    assert env.worker._parked is None and env.status() == "queued"
+    assert env.db.list_libraries()[0].status == "offline"
+    assert env.lib_file.read_bytes() == env.original_bytes
+    assert env.incoming_files() == []
+
+
+def test_no_room_on_a_connected_drive_still_waits(env):
+    env.queue_video()
+    env.free["library"] = 0
+    assert env.worker.process_one() is False
+    assert env.worker.process_one() is False
+    assert env.worker._parked is not None and env.encodes == 1
+    assert env.db.list_libraries()[0].status == "ok"
+
+
+# ---- remembering the drives that held a file
+
+def test_moving_a_file_to_holding_remembers_its_volume(env):
+    env.queue_video()
+    env.worker.process_one()
+    assert env.status() == "converted"
+    assert env.db.held_volumes() == [str(env.volume)]
+
+
+def test_replacing_without_holding_remembers_nothing(env):
+    env.db.set_setting("holding_enabled", "0")
+    env.queue_video()
+    env.worker.process_one()
+    assert env.status() == "converted" and env.db.held_volumes() == []
+
+
+# ---- Try again, for a file that never had a run
+
+def test_try_again_works_for_a_file_that_failed_at_scan_time(env):
+    bad = env.lib / "bad.mkv"
+    bad.write_bytes(b"not a video")
+    st = os.stat(bad)
+    f = env.db.upsert_file(env.library.id, str(bad), st.st_size, st.st_mtime, "failed",
+                           "Couldn't read this file")
+    assert env.db.file_details(f.id)["runs"] == []
+    env.worker.retry(f.id)
+    assert env.db.get_file(f.id).status == "queued"
+    assert env.worker.process_one() is True
+    row = env.db.get_file(f.id)
+    assert row.status == "failed" and row.reason == "Couldn't read this file"
+    # Once the file has been put right, it goes all the way through.
+    source_video(bad)
+    st = os.stat(bad)
+    env.db.upsert_file(env.library.id, str(bad), st.st_size, st.st_mtime, "failed",
+                       "Couldn't read this file")
+    env.worker.retry(f.id)
+    assert env.worker.process_one() is True
+    assert env.db.get_file(f.id).status == "converted"

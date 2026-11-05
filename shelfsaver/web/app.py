@@ -26,6 +26,7 @@ from pydantic import BaseModel, StrictBool
 from .. import swap
 from ..db import ensure_mcp_token
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
+from ..worker import _format_name
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,12 @@ LOGIN_WINDOW_SECONDS = 60.0
 LEVELS = ("low", "medium", "high")
 ACTIVE_RUN_STATES = ("running", "swapping", "waiting_in_use")
 MAX_PAGE = 500
+HISTORY_GROUPS = {
+    "converted": ("converted",),
+    "skipped": ("skipped",),
+    "attention": ("failed", "interrupted", "waiting_in_use", "missing"),
+}
+HELD_CACHE_SECONDS = 30.0
 STATIC_DIR = Path(__file__).parent / "static"
 PAGES = {"/": "index.html", "/library": "library.html", "/settings": "settings.html",
          "/login": "login.html"}
@@ -127,7 +134,7 @@ class LibraryBody(BaseModel):
     name: str = ""
     path: str = ""
     level: str = ""
-    english_only: StrictBool = True
+    english_only: StrictBool = False
 
 
 class LibraryPatch(BaseModel):
@@ -206,11 +213,11 @@ def _drives() -> list[dict]:
     return found
 
 
-def _drive_list(libraries) -> list[str]:
+def _drive_list(paths) -> list[str]:
     drives = []
-    for library in libraries:
+    for path in paths:
         try:
-            drive = str(swap.work_root(library.path).parent)
+            drive = str(swap.work_root(path).parent)
         except Exception:
             continue
         if drive not in drives:
@@ -354,16 +361,36 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             busy.update(f.library_id for f in db.files_with_status(status))
         return busy
 
+    def held_paths() -> list[str]:
+        """The libraries, and every volume that may still hold files from a removed one."""
+        return [l.path for l in db.list_libraries()] + db.held_volumes()
+
+    def remember_volume(path: str) -> None:
+        db.remember_held_volume(str(swap.work_root(path).parent))
+
+    held_lock = threading.Lock()  # also keeps polls from walking the folders side by side
+    held_cache: dict[str, Any] = {"at": None, "paths": None, "bytes": 0}
+
+    def held_bytes(fresh: bool = True) -> int:
+        """Bytes held. fresh=False lets a recent measurement stand, because walking a large
+        holding folder is too slow for every poll."""
+        paths = held_paths()
+        with held_lock:
+            at = held_cache["at"]
+            if (fresh or at is None or held_cache["paths"] != paths
+                    or time.monotonic() - at >= HELD_CACHE_SECONDS):
+                try:
+                    held_cache["bytes"] = swap.held_size(paths)
+                except Exception:
+                    logger.exception("Could not measure the holding folder")
+                    held_cache["bytes"] = 0
+                held_cache["at"], held_cache["paths"] = time.monotonic(), paths
+            return held_cache["bytes"]
+
     def held_info() -> dict:
-        libraries = db.list_libraries()
-        try:
-            held = swap.held_size([l.path for l in libraries])
-        except Exception:
-            logger.exception("Could not measure the holding folder")
-            held = 0
-        return {"held_bytes": held,
-                "held_libraries": [l.name for l in libraries],
-                "held_drives": _drive_list(libraries)}
+        return {"held_bytes": held_bytes(),
+                "held_libraries": [l.name for l in db.list_libraries()],
+                "held_drives": _drive_list(held_paths())}
 
     def scratch_setting() -> Optional[str]:
         return db.get_setting("scratch_dir") or None
@@ -378,7 +405,8 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             "message": state.get("message"),
             "no_scratch": scratch_setting() is None,
             "stats": db.stats(),
-            "held_bytes": held_info()["held_bytes"],
+            "scanner": scanner.status(),
+            "held_bytes": held_bytes(fresh=False),
             "offline_libraries": [{"id": l.id, "name": l.name}
                                   for l in db.list_libraries() if l.status == "offline"],
         }
@@ -396,42 +424,39 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     # ---- history and files
 
     @api.get("/history")
-    def history(library_id: Optional[int] = None, limit: int = 100, offset: int = 0):
+    def history(library_id: Optional[int] = None, limit: int = 100, offset: int = 0,
+                show: str = "all"):
         if not 1 <= limit <= MAX_PAGE or offset < 0:
             raise _fail(400, f"Ask for between 1 and {MAX_PAGE} rows at a time.")
+        if show != "all" and show not in HISTORY_GROUPS:
+            raise _fail(400, "That isn't one of the choices for what to show.")
         names = {l.id: l.name for l in db.list_libraries()}
 
-        def was_interrupted(run, file):
-            # A restart ended this run; if the file has since failed, that was a later run.
-            return run["state"] == "interrupted" and (file is None or file.status == "failed")
+        def base_name(path):
+            return os.path.basename(path.replace("\\", "/")) if path else ""
 
-        def status_of(run, file):
-            if was_interrupted(run, file):
-                return "interrupted"
-            return file.status if file else run["state"]
-
-        def reason_of(run, file):
-            if was_interrupted(run, file):
-                return run["error"]
-            return file.reason if file else None
-
-        rows = []
-        for run in db.history(library_id, limit, offset):
+        def run_row(item):
+            run = db.run_record(item["id"])
             file = db.get_file(run["file_id"])
             path = run.get("file_path") or (file.path if file else "")
-            rows.append({
+            # The file's own status and reason say what is true now; a run that was only
+            # interrupted or paused is not a failure.
+            if item["status"] == "interrupted":
+                reason = run["error"]
+            else:
+                reason = file.reason if file else None
+            return {
+                "kind": "run",
                 "id": run["id"],
                 "file_id": run["file_id"],
                 "library_id": run["library_id"],
                 "library": names.get(run["library_id"]),
-                "name": os.path.basename(path.replace("\\", "/")) if path else "",
+                "name": base_name(path),
                 "path": path,
                 "now_path": run["now_path"],
                 "state": run["state"],
-                # The file's own status and reason say what is true now; a run that was only
-                # interrupted or paused is not a failure.
-                "status": status_of(run, file),
-                "reason": reason_of(run, file),
+                "status": item["status"],
+                "reason": reason,
                 "was": {"size": run["was_size"], "format": run["was_format"],
                         "bitrate": run["was_bitrate"]},
                 "now": {"size": run["now_size"], "format": run["now_format"],
@@ -440,8 +465,36 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                 "why": run["why"],
                 "started_at": run["started_at"],
                 "finished_at": run["finished_at"],
-            })
-        return rows
+                "updated_at": item["at"],
+            }
+
+        def file_row(item):
+            file = db.get_file(item["id"])
+            return {
+                "kind": "file",
+                "id": f"file-{file.id}",  # run ids are numbers, and the page tells rows apart by id
+                "file_id": file.id,
+                "library_id": file.library_id,
+                "library": names.get(file.library_id),
+                "name": base_name(file.path),
+                "path": file.path,
+                "now_path": None,
+                "state": None,
+                "status": file.status,
+                "reason": file.reason,
+                "was": {"size": file.size,
+                        "format": _format_name(file.codec) if file.codec else None,
+                        "bitrate": None},
+                "now": {"size": None, "format": None, "bitrate": None},
+                "saved_bytes": 0,
+                "why": None,
+                "started_at": None,
+                "finished_at": None,
+                "updated_at": item["at"],
+            }
+
+        items = db.timeline(library_id, limit, offset, HISTORY_GROUPS.get(show))
+        return [run_row(i) if i["kind"] == "run" else file_row(i) for i in items]
 
     @api.get("/files/{file_id}")
     def file_details(file_id: int):
@@ -520,6 +573,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         if scratch and _overlaps(path, scratch):
             raise _fail(400, "That folder is the scratch disk folder or overlaps it.")
         library = db.add_library(name, path, level, body.english_only)
+        remember_volume(path)
         _in_background("scan", scanner.refresh_watches, lambda: scanner.scan_library(library.id))
         return library_json(library)
 
@@ -541,9 +595,10 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     @api.delete("/libraries/{library_id}")
     def remove_library(library_id: int):
-        library_or_404(library_id)
+        library = library_or_404(library_id)
         if library_id in busy_library_ids():
             raise _fail(400, STILL_FINISHING)
+        remember_volume(library.path)  # its held files must stay visible and clearable
         db.remove_library(library_id)
         try:
             scanner.refresh_watches()
@@ -628,13 +683,13 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     def clear_holding(body: Optional[ConfirmBody] = None):
         if body is None or body.confirm is not True:
             raise _fail(400, "Please confirm that you want to empty the holding folder.")
-        libraries = db.list_libraries()
-        freed = worker.clear_holding_when_idle([l.path for l in libraries], ACTIVE_RUN_STATES)
+        paths = held_paths()
+        freed = worker.clear_holding_when_idle(paths, ACTIVE_RUN_STATES)
         if freed is None:
             raise _fail(400, HOLDING_BUSY)
         return {"freed_bytes": freed,
-                "libraries": [l.name for l in libraries],
-                "drives": _drive_list(libraries),
+                "libraries": [l.name for l in db.list_libraries()],
+                "drives": _drive_list(paths),
                 "held_bytes": held_info()["held_bytes"]}
 
     app.include_router(open_api)

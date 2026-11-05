@@ -381,3 +381,97 @@ def test_full_decode_is_tied_to_the_app(tmp_path, monkeypatch):
     path = make_video(tmp_path / "a.mkv", seconds=1, size="320x180")
     assert v._plays(path, 0, "ffmpeg", lambda: False) is True
     assert len(tied) == 1
+
+
+CUT_SHORT = "The original seems to be cut short, so it was left alone"
+
+
+def _cut_in_half(path):
+    data = path.read_bytes()
+    path.write_bytes(data[:len(data) // 2])
+    return path
+
+
+def _encode(source, out):
+    """What the real conversion does: rebuild from whatever the source's demuxer can read."""
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-map", "0",
+                    "-c:v", "libx265", "-crf", "30", "-x265-params", "log-level=error",
+                    "-c:a", "copy", "-c:s", "copy", str(out)], check=True)
+    return out
+
+
+def test_source_that_stops_before_its_stated_length_fails(tmp_path):
+    source = _cut_in_half(make_video(tmp_path / "src.mkv", seconds=20, size=SIZE, crf=10))
+    src = probe(source, "ffprobe")
+    assert src.duration == pytest.approx(20, abs=1)  # the header still says 20 seconds
+    out = _encode(source, tmp_path / "o.mkv")
+    src = dataclasses.replace(src, size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert not r.passed and r.checks["length"] is False and r.checks["plays"] is False
+    assert r.reason == CUT_SHORT and not r.not_worth_it
+
+
+def test_source_with_a_start_offset_that_stops_early_fails(tmp_path):
+    whole = make_video(tmp_path / "h.mkv", seconds=20, size=SIZE, crf=10)
+    source = tmp_path / "src.mkv"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(whole), "-c", "copy",
+                    "-output_ts_offset", "3600", str(source)], check=True)
+    _cut_in_half(source)
+    out = _encode(source, tmp_path / "o.mkv")
+    src = dataclasses.replace(probe(source, "ffprobe"), size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert not r.passed and r.reason == CUT_SHORT
+
+
+def test_lone_long_subtitle_does_not_count_as_a_cut_short_source(tmp_path):
+    # The last subtitle starts long after the picture ends, and itself lasts a long time.
+    subs = tmp_path / "late.srt"
+    subs.write_text("1\n00:01:40,000 --> 00:02:10,000\nLate\n", encoding="utf-8")
+    plain = make_video(tmp_path / "h.mkv", seconds=4, size=SIZE, crf=10)
+    source = tmp_path / "src.mkv"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(plain), "-i", str(subs),
+                    "-map", "0", "-map", "1", "-c", "copy", "-c:s", "srt",
+                    "-metadata:s:s:0", "language=eng", str(source)], check=True)
+    src = probe(source, "ffprobe")
+    assert src.duration > 100
+    out = _encode(source, tmp_path / "o.mkv")
+    src = dataclasses.replace(src, size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert r.passed, r
+
+
+def test_removed_longer_audio_does_not_count_as_a_cut_short_source(tmp_path):
+    long_av = make_video(tmp_path / "long.mkv", seconds=20, size=SIZE, crf=10)
+    source = tmp_path / "src.mkv"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-t", "4", "-i", str(long_av),
+                    "-i", str(long_av), "-map", "0:v", "-map", "0:a", "-map", "1:a",
+                    "-c", "copy", "-metadata:s:a:0", "language=eng",
+                    "-metadata:s:a:1", "language=spa", str(source)], check=True)
+    src = probe(source, "ffprobe")
+    assert src.duration > 15
+    spa = next(s.index for s in src.streams if s.language == "spa")
+    out = _out(tmp_path)
+    src = dataclasses.replace(src, size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(remove_audio=(spa,)), "ffmpeg", "ffprobe")
+    assert r.passed, r
+
+
+@pytest.mark.parametrize("duration,span_end,cut_short", [
+    (100.0, 98.5, False), (100.0, 97.5, True),     # 98% of a longer file
+    (10.0, 9.1, False), (10.0, 8.9, True),         # the 1 s floor on a short one
+    (0.0, 50.0, False),                            # no stated length to compare with
+])
+def test_how_far_short_a_source_can_be(tmp_path, monkeypatch, duration, span_end, cut_short):
+    import shelfsaver.verify as v
+    src = dataclasses.replace(_src(tmp_path), path="src.mkv", duration=duration)
+    out = probe(_out(tmp_path), "ffprobe")
+    vid = v._main_video(src).index
+    aud = next(s.index for s in src.streams if s.kind == "audio")
+    ovid = v._main_video(out).index
+    oaud = next(s.index for s in out.streams if s.kind == "audio")
+    span = StreamSpan(0.0, span_end, 0.04)
+    _fake_spans(monkeypatch, {vid: span, aud: span}, {ovid: span, oaud: span})
+    src = dataclasses.replace(src, size=out.size * 10)
+    monkeypatch.setattr(v, "_plays", lambda *a, **k: True)
+    r = verify_output(src, out.path, convert(), "ffmpeg", "ffprobe")
+    assert (r.reason == CUT_SHORT) is cut_short and r.passed is not cut_short

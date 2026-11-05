@@ -77,6 +77,7 @@ INTERRUPTED_NOTE = "Interrupted by a restart, so it will start again"
 RESOLVED_NOTE = ("Marked as handled by you. Nothing was deleted or moved. Any leftover files "
                  "are in the ShelfSaver folder on this drive.")
 CHANGED_NOTE = "The original changed during the conversion, so it will start again"
+DRIVE_OFFLINE_NOTE = "The library drive went offline, so this will start again once it is back"
 
 _FORMAT_NAMES = {
     "h264": "H.264", "hevc": "x265", "mpeg2video": "MPEG-2", "mpeg1video": "MPEG-1",
@@ -662,12 +663,14 @@ class Worker:
         self._begin_step(job, "Converting")
         cmd = build_command(job.info, job.decision, job.library.level, source_copy, job.output,
                             self.config.ffmpeg)
+        convert_began = _now()
         try:
             result = run_ffmpeg(cmd, job.info.duration, self._on_progress, self._should_stop)
         except OSError as exc:
             result = EncodeResult(-1, False, f"FFmpeg could not start: {exc}")
         job.log_tail = result.log_tail
-        self.db.update_run(job.run.id, log_tail=result.log_tail)
+        self.db.update_run(job.run.id, log_tail=result.log_tail,
+                           convert_seconds=_now() - convert_began)
 
         out_info = None
         if result.returncode == 0:
@@ -727,16 +730,27 @@ class Worker:
 
     # ---- Steps 5 to 8: bring the new file to the library's volume and swap it in ----
 
-    def _library_has_room(self, job: _Job) -> bool:
-        needed = os.stat(ext_path(job.output)).st_size + SPACE_RESERVE_BYTES
+    def _library_room(self, job: _Job) -> Optional[int]:
+        """Free bytes on the library's drive, or None when it can't be reached."""
         try:
-            return free_bytes(job.library.path) >= needed
+            if not os.path.isdir(ext_path(job.library.path)):
+                return None
+            return free_bytes(job.library.path)
         except OSError as exc:
             logger.warning("Could not check the room on %s: %s", job.library.path, exc)
-            return False
+            return None
 
     def _place_new_file(self, job: _Job) -> bool:
-        if not self._library_has_room(job):
+        room = self._library_room(job)
+        if room is None:
+            # Holding the only parked place until the drive is back would stop every other
+            # library, so this one starts again later. Its original was never touched.
+            logger.warning("The library drive is offline, so %s will start again later",
+                           job.file.path)
+            self.db.update_library(job.library.id, status="offline")
+            self._end_and_requeue(job, DRIVE_OFFLINE_NOTE)
+            return True
+        if room < os.stat(ext_path(job.output)).st_size + SPACE_RESERVE_BYTES:
             # Keep the finished conversion: it is the expensive part, and nothing is at risk.
             logger.info("Not enough room on the library drive for %s", job.file.path)
             self._parked = job
@@ -784,6 +798,8 @@ class Worker:
 
         # Written before anything moves, so a crash at any later point can be picked up.
         with self._holding_lock:
+            if plan.holding:
+                self.db.remember_held_volume(str(work_root(job.library.path).parent))
             self.db.update_run(job.run.id, state="swapping", now_path=plan.final,
                                swap_json=_dump_swap(plan, job.size, job.mtime))
         job.swap_saved = True

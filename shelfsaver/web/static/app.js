@@ -442,9 +442,10 @@
       }
       var text = '';
       if (row.status === 'skipped') text = row.reason || 'Not needed';
-      else if (row.status === 'failed') text = 'Original kept';
+      else if (row.status === 'failed') text = row.kind === 'file' ? row.reason || 'Left as is' : 'Original kept';
       else if (row.status === 'interrupted') text = 'Will start again';
       else if (row.status === 'waiting_in_use') text = 'Will try again';
+      else if (row.status === 'missing') text = 'No longer there';
       return el('td', { class: row.status === 'failed' ? 'fail' : 'skip', text: text });
     }
 
@@ -512,8 +513,8 @@
           goneAudio.length ? el('span', { class: 'sub', text: 'Removed: ' + goneAudio.map(trackName).join(', ') }) : null])]);
         add(grid, [field('Subtitles', keptSubs.length ? plural(keptSubs.length, 'subtitle', 'subtitles') + ' kept' : 'None')]);
       }
-      if (run.finished_at && run.started_at && row.status === 'converted') {
-        add(grid, [field('Conversion time', fmtSpan(run.finished_at - run.started_at))]);
+      if (run.convert_seconds !== null && run.convert_seconds !== undefined && row.status === 'converted') {
+        add(grid, [field('Conversion time', fmtSpan(run.convert_seconds))]);
       }
       if (run.finished_at) add(grid, [field('Finished', fmtDate(run.finished_at))]);
       if (run.checks) {
@@ -526,8 +527,13 @@
         });
         add(grid, [field('Checks', marks, true)]);
       }
-      if (why) add(grid, [field('Why it was converted', why, true)]);
+      if (row.status === 'skipped') {
+        if (row.reason) add(grid, [field('Why it was skipped', row.reason, true)]);
+      } else if (why) {
+        add(grid, [field('Why it was converted', why, true)]);
+      }
       var happened = row.status === 'converted' || row.status === 'skipped' ? '' : (row.reason || run.error || '');
+      if (!happened && row.status === 'missing') happened = "ShelfSaver can't find this file in its folder any more.";
       if (happened) add(grid, [field('What happened', happened, true)]);
       add(grid, [field('Where it is', el('span', { class: 'mono small', text: file.path }), true)]);
       add(cell, [grid]);
@@ -615,7 +621,8 @@
     }
 
     function refresh() {
-      var query = '?limit=' + state.limit + (options.libraryId ? '&library_id=' + options.libraryId : '');
+      var query = '?limit=' + state.limit + (options.libraryId ? '&library_id=' + options.libraryId : '') +
+        (state.filter !== 'all' ? '&show=' + state.filter : '');
       return api('GET', '/api/history' + query).then(function (rows) {
         state.rows = rows;
         var open = rows.filter(function (r) { return r.id === state.openId; })[0];
@@ -625,7 +632,12 @@
 
     return {
       refresh: refresh,
-      setFilter: function (value) { state.filter = value; render(true); }
+      setFilter: function (value) {
+        state.filter = value;
+        state.limit = PAGE_SIZE;
+        render(true);
+        return refresh();
+      }
     };
   }
 
@@ -645,7 +657,7 @@
         worker.state === 'no_scratch' ? [' ', el('a', { href: '/settings', text: 'Open Settings' })] : null]));
     }
     (status.offline_libraries || []).forEach(function (lib) {
-      items.push(notice('', 'The library "' + lib.name + '" is offline. Check that its drive is connected.'));
+      items.push(notice('', 'The library drive is offline for "' + lib.name + '". Check that it is connected. Other libraries carry on.'));
     });
     var signature = JSON.stringify(items.map(function (n) { return n.textContent; }));
     if (container.getAttribute('data-sig') === signature) return;
@@ -655,11 +667,23 @@
 
   // ---- Home
 
+  var PAUSE_HELP = 'Stops converting. The file being converted will start over when you resume.';
+
   function basenameOfStatus(worker) { return baseName(worker.file); }
+
+  function scanLine(scanner) {
+    if (!scanner) return null;
+    if (scanner.pending > 0) {
+      return 'Looking through your libraries: ' + fmtCount(scanner.pending) +
+        (scanner.pending === 1 ? ' file' : ' files') + ' to check';
+    }
+    return scanner.scanning ? 'Looking through your libraries…' : null;
+  }
 
   function drawNow(box, status) {
     var worker = status.worker || {};
     var title, line = null, bar = null;
+    var scanning = scanLine(status.scanner);
     if (worker.state === 'working' && worker.file) {
       title = (worker.step || 'Working') + ': ' + basenameOfStatus(worker);
       var known = worker.percent !== null && worker.percent !== undefined;
@@ -672,18 +696,24 @@
         : 'Getting started…';
     } else if (worker.state === 'paused') {
       title = 'Paused';
-      line = 'Nothing will be converted until you press Resume.';
+      line = 'Nothing will be converted until you press Resume. A file that was being converted will start over when you resume.';
     } else if (worker.state === 'no_scratch') {
       title = 'Waiting for a scratch disk';
       line = 'Conversions start once a scratch disk is available.';
     } else {
       title = 'Nothing is being converted right now';
-      line = status.stats && status.stats.remaining ? 'The next file will start shortly.' : 'ShelfSaver is watching your libraries for new files.';
+      if (status.stats && status.stats.remaining) {
+        line = 'The next file will start shortly.';
+      } else {
+        line = scanning || 'ShelfSaver is watching your libraries for new files.';
+        scanning = null;
+      }
     }
-    var signature = JSON.stringify([title, line, worker.percent]);
+    var signature = JSON.stringify([title, line, scanning, worker.percent]);
     if (box.getAttribute('data-sig') === signature) return;
     box.setAttribute('data-sig', signature);
-    fill(box, el('div', { class: 'now-title', text: title }), bar, el('div', { class: 'muted small', text: line }));
+    fill(box, el('div', { class: 'now-title', text: title }), bar, el('div', { class: 'muted small', text: line }),
+      scanning ? el('div', { class: 'muted small', text: scanning }) : null);
   }
 
   function initHome() {
@@ -720,6 +750,7 @@
         paused = (status.worker || {}).state === 'paused';
         pause.hidden = false;
         pause.textContent = paused ? 'Resume' : 'Pause';
+        pause.title = paused ? 'Start converting again' : PAUSE_HELP;
         byId('first-run').hidden = !status.no_scratch;
         byId('stat-saved').textContent = fmtSize(status.stats.saved_bytes);
         byId('stat-converted').textContent = fmtCount(status.stats.converted);
@@ -902,12 +933,12 @@
 
       var clearBtn = el('button', { type: 'button', text: 'Clear the holding folder', onclick: function () {
         var drives = data.held_drives.length ? data.held_drives.join(', ') : 'the drives your libraries are on';
-        var names = data.held_libraries.length ? data.held_libraries.join(', ') : 'none yet';
+        var names = data.held_libraries.length ? ' Libraries affected: ' + data.held_libraries.join(', ') + '.' : '';
         confirmDialog({
           title: 'Clear the holding folder?',
           lines: [
             'This clears the held originals for every library on the same drive, not just one: ' +
-              'drives affected: ' + drives + '. Libraries affected: ' + names + '.',
+              'drives affected: ' + drives + '.' + names,
             'The held originals (' + fmtSize(data.held_bytes) + ') are deleted permanently. ' +
               "They can't be brought back.",
             'ShelfSaver can only do this when no file is being replaced.'

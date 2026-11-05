@@ -1,6 +1,8 @@
 """SQLite storage: one connection per thread, WAL mode."""
 from __future__ import annotations
 
+import json
+import os
 import secrets
 import sqlite3
 import threading
@@ -16,7 +18,7 @@ CREATE TABLE IF NOT EXISTS libraries (
     name TEXT NOT NULL,
     path TEXT NOT NULL,
     level TEXT NOT NULL,
-    english_only INTEGER NOT NULL DEFAULT 1,
+    english_only INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'ok'
 );
 CREATE TABLE IF NOT EXISTS files (
@@ -56,6 +58,7 @@ CREATE TABLE IF NOT EXISTS runs (
     swap_json TEXT,
     error TEXT,
     log_tail TEXT,
+    convert_seconds REAL,
     saved_bytes INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_runs_state ON runs(state);
@@ -76,9 +79,17 @@ LIBRARY_FIELDS ={"name", "path", "level", "english_only", "status"}
 RUN_FIELDS = {
     "state", "step", "started_at", "finished_at", "was_size", "now_size",
     "was_format", "now_format", "now_path", "was_bitrate", "now_bitrate", "why",
-    "tracks_json", "checks_json", "swap_json", "error", "log_tail", "saved_bytes",
+    "tracks_json", "checks_json", "swap_json", "error", "log_tail", "convert_seconds",
+    "saved_bytes",
 }
 RUN_COLUMNS = ["id", "file_id", *sorted(RUN_FIELDS)]
+HELD_VOLUMES = "held_volumes"
+RUNLESS_HISTORY_STATUSES = ("skipped", "failed", "missing", "waiting_in_use")
+# What a run's row in the history says: a run a restart ended is not a failure of the file.
+_RUN_ROW_STATUS = (
+    "CASE WHEN r.state='interrupted' AND (f.id IS NULL OR f.status='failed') THEN 'interrupted'"
+    " WHEN f.id IS NOT NULL THEN f.status ELSE r.state END"
+)
 
 
 NOT_OWNED = (
@@ -109,6 +120,13 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._conn().executescript(SCHEMA)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """Bring a database from an earlier version up to date."""
+        columns = {row["name"] for row in self._query("PRAGMA table_info(runs)")}
+        if "convert_seconds" not in columns:
+            self._exec("ALTER TABLE runs ADD COLUMN convert_seconds REAL")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -190,6 +208,28 @@ class Database:
             (key, value),
         )
         return cur.rowcount > 0
+
+    def held_volumes(self) -> list[str]:
+        """Every volume that has held a file or had a library, even if its library is gone."""
+        try:
+            volumes = json.loads(self.get_setting(HELD_VOLUMES, "[]"))
+        except ValueError:
+            return []
+        return [v for v in volumes if isinstance(v, str)] if isinstance(volumes, list) else []
+
+    def remember_held_volume(self, volume: str) -> None:
+        conn = self._conn()
+        with conn:
+            # Taken before reading, so two threads can't each overwrite the other's addition.
+            conn.execute("BEGIN IMMEDIATE")
+            volumes = self.held_volumes()
+            if os.path.normcase(volume) in map(os.path.normcase, volumes):
+                return
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (HELD_VOLUMES, json.dumps([*volumes, volume])),
+            )
 
     # sessions: only a hash of each token is stored
     def add_session(self, token_hash: str, expires_at: float) -> None:
@@ -384,6 +424,39 @@ class Database:
             args.append(library_id)
         rows = self._query(
             f"SELECT * FROM runs {where} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
+            (*args, limit, offset),
+        )
+        return [dict(r) for r in rows]
+
+    def timeline(
+        self, library_id: Optional[int] = None, limit: int = 100, offset: int = 0,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[dict]:
+        """Runs, and files that never had one, most recently updated first.
+
+        Each item has kind ("run" or "file"), id, status and at. Filtering happens here so that
+        paging reaches every match, however many other rows there are.
+        """
+        marks = ",".join("?" * len(RUNLESS_HISTORY_STATUSES))
+        where, args = [], [*RUNLESS_HISTORY_STATUSES]
+        if library_id is not None:
+            where.append("library_id=?")
+            args.append(library_id)
+        if statuses is not None:
+            statuses = list(statuses)
+            where.append(f"status IN ({','.join('?' * len(statuses))})")
+            args.extend(statuses)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = self._query(
+            "SELECT kind, id, status, at FROM ("
+            f" SELECT 'run' AS kind, r.id AS id, {_RUN_ROW_STATUS} AS status,"
+            "  COALESCE(r.finished_at, r.started_at) AS at, r.library_id AS library_id"
+            "  FROM runs r LEFT JOIN files f ON f.id=r.file_id"
+            " UNION ALL"
+            " SELECT 'file', f.id, f.status, f.updated_at, f.library_id FROM files f"
+            f"  WHERE f.status IN ({marks})"
+            "  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.file_id=f.id)"
+            f"){clause} ORDER BY at DESC, kind DESC, id DESC LIMIT ? OFFSET ?",
             (*args, limit, offset),
         )
         return [dict(r) for r in rows]

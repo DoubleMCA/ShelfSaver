@@ -13,7 +13,8 @@ _EFFICIENT_WHY = "Already stored in a modern, efficient format"
 
 
 def _is_english(lang) -> bool:
-    return bool(lang) and lang.strip().lower() in _ENGLISH
+    # Only the main part of the tag counts, so en-US and en_GB are English but enm is not.
+    return bool(lang) and lang.strip().lower().replace("_", "-").split("-")[0] in _ENGLISH
 
 
 def audio_to_remove(streams) -> tuple:

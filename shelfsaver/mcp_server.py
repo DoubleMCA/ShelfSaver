@@ -83,7 +83,7 @@ def build_mcp(db, worker, config) -> MCPServer:
     def status_now() -> dict:
         libraries = db.list_libraries()
         try:
-            held = swap.held_size([l.path for l in libraries])
+            held = swap.held_size([l.path for l in libraries] + db.held_volumes())
         except Exception:
             held = None
         return {

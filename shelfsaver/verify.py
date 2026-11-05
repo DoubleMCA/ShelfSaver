@@ -22,7 +22,12 @@ REASONS = {
     "smaller": "Would not save enough",
     "plays": "New file failed the playback check",
 }
+SOURCE_CUT_SHORT = "The original seems to be cut short, so it was left alone"
 HDR_TRANSFERS = ("smpte2084", "arib-std-b67")
+
+
+class _SourceCutShort(Exception):
+    """The original's own packets stop well before the length its header states."""
 
 
 def _language(stream) -> str:
@@ -80,9 +85,31 @@ def _kept_pairs(source: MediaInfo, output: MediaInfo, decision: Decision):
     return [(sv.index, ov.index)] + list(zip(src_audio, out_audio))
 
 
+def _falls_short(span: float, stated: float) -> bool:
+    return span < stated - max(1.0, 0.02 * stated)
+
+
+def _source_cut_short(source: MediaInfo, spans: dict, pairs) -> bool:
+    """True if reading the original stopped early, which would also shorten the new file and
+    hide it from the stream comparison. Any doubt about the header counts as not cut short."""
+    kept = [spans[s] for s, _ in pairs]
+    start = min(k.start for k in kept)
+    end = max(k.end for k in kept)
+    span = end - start
+    if not _falls_short(span, source.duration):
+        return False
+    # Another stream outlasts the kept ones, such as a lone late subtitle. Reading got past the
+    # end of the kept streams, and that stream is what the header's longer length describes.
+    if max(s.end for s in spans.values()) > end + 1.0:
+        return False
+    # Some headers count from zero rather than from the first packet, so a large start offset
+    # is part of the stated length. With an offset bigger than that length this can't fail.
+    return _falls_short(span, source.duration - start)
+
+
 def _stream_lengths_ok(source: MediaInfo, output: MediaInfo, out_path, decision,
                        ffprobe, should_stop):
-    """True/False, or None when stopped.
+    """True/False, or None when stopped. Raises `_SourceCutShort` for a cut-short original.
 
     Each kept stream must start and end where its source stream does (both measured
     from the earliest packet of the kept streams, so a source that starts at a
@@ -100,6 +127,8 @@ def _stream_lengths_ok(source: MediaInfo, output: MediaInfo, out_path, decision,
         return False
     if any(s not in src or o not in out for s, o in pairs):
         return False
+    if _source_cut_short(source, src, pairs):
+        raise _SourceCutShort()
     allowed = max(1.0, 0.002 * source.duration)
     src_origin = min(src[s].start for s, _ in pairs)
     out_origin = min(out[o].start for _, o in pairs)
@@ -178,7 +207,10 @@ def verify_output(source: MediaInfo, output, decision: Decision, ffmpeg, ffprobe
     # a longer duration), so length is judged from per-stream packet timing. It runs
     # even when the file is too big, so a truncated file is never excused as "not worth it".
     if checks["tracks"]:
-        lengths = _stream_lengths_ok(source, out, output, decision, ffprobe, should_stop)
+        try:
+            lengths = _stream_lengths_ok(source, out, output, decision, ffprobe, should_stop)
+        except _SourceCutShort:
+            return VerifyResult(False, checks, SOURCE_CUT_SHORT)
         if lengths is None:
             return VerifyResult(False, checks, "Stopped")
         checks["length"] = lengths

@@ -1,8 +1,9 @@
+import sqlite3
 import threading
 
 import pytest
 
-from shelfsaver.db import Database
+from shelfsaver.db import SCHEMA, Database
 from shelfsaver.logs import tail_log
 
 
@@ -186,3 +187,74 @@ def test_claim_file_needs_a_queued_unchanged_row(tmp_path):
     got = db.get_file(row.id)
     assert (got.status, got.size, got.mtime, got.codec) == ("working", 12, 3.0, "h264")
     assert not db.claim_file(row.id, 12, 3.0, 12, 3.0)
+
+
+def test_english_only_column_defaults_off_and_old_rows_keep_their_value(tmp_path):
+    db = Database(tmp_path / "defaults.db")
+    kept = db.add_library("Kept", "kept", "low", True)
+    db._exec("INSERT INTO libraries(name, path, level) VALUES ('New', 'new', 'low')")
+    db.close()
+    again = Database(tmp_path / "defaults.db")
+    by_name = {l.name: l for l in again.list_libraries()}
+    assert by_name["Kept"].id == kept.id and by_name["Kept"].english_only is True
+    assert by_name["New"].english_only is False
+
+
+def test_an_older_database_gains_the_conversion_time_column(tmp_path):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA.replace("convert_seconds REAL,", ""))
+    conn.execute("INSERT INTO runs(file_id, state, started_at) VALUES (1, 'done', 1.0)")
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    assert db.history()[0]["convert_seconds"] is None
+    db.update_run(1, convert_seconds=12.5)
+    assert db.run_record(1)["convert_seconds"] == 12.5
+    db.close()
+    assert Database(path).run_record(1)["convert_seconds"] == 12.5
+
+
+def test_held_volumes_are_remembered_once_and_survive_a_restart(tmp_path):
+    db = Database(tmp_path / "held.db")
+    assert db.held_volumes() == []
+    db.remember_held_volume("X:\\")
+    db.remember_held_volume("x:\\")
+    db.remember_held_volume("Y:\\")
+    db.close()
+    assert Database(tmp_path / "held.db").held_volumes() == ["X:\\", "Y:\\"]
+
+
+def test_a_damaged_held_volume_list_is_replaced_not_fatal(tmp_path):
+    db = Database(tmp_path / "held.db")
+    db.set_setting("held_volumes", "not json")
+    assert db.held_volumes() == []
+    db.remember_held_volume("X:\\")
+    assert db.held_volumes() == ["X:\\"]
+
+
+def test_timeline_merges_runs_and_runless_files_newest_first(db, lib):
+    def at(file_id, when):
+        db._exec("UPDATE files SET updated_at=? WHERE id=?", (when, file_id))
+
+    skipped = db.upsert_file(lib.id, "s.mkv", 1, 1.0, "skipped", "Already small")
+    failed = db.upsert_file(lib.id, "f.mkv", 1, 1.0, "failed", "Couldn't read this file")
+    db.upsert_file(lib.id, "q.mkv", 1, 1.0, "queued")
+    done = db.upsert_file(lib.id, "d.mkv", 1, 1.0, "converted")
+    run = db.start_run(done.id, 1, "H.264", None, "why")
+    db.update_run(run.id, state="done", started_at=100.0, finished_at=200.0)
+    at(skipped.id, 300.0)
+    at(failed.id, 150.0)
+    at(done.id, 999.0)  # a run is placed by its own time, not its file's
+    keys = [(i["kind"], i["id"]) for i in db.timeline()]
+    assert keys == [("file", skipped.id), ("run", run.id), ("file", failed.id)]
+    assert [(i["kind"], i["id"]) for i in db.timeline(limit=1, offset=1)] == [("run", run.id)]
+    assert [i["id"] for i in db.timeline(limit=5, statuses=("failed",))] == [failed.id]
+    assert db.timeline(library_id=lib.id + 1) == []
+
+
+def test_timeline_shows_a_file_with_a_run_only_as_its_run(db, lib):
+    f = db.upsert_file(lib.id, "a.mkv", 1, 1.0, "skipped", "Would not save enough")
+    run = db.start_run(f.id, 1, "H.264", None, "why")
+    assert [(i["kind"], i["id"], i["status"]) for i in db.timeline()] == [
+        ("run", run.id, "skipped")]

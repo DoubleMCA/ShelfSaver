@@ -60,9 +60,17 @@ class Scanner:
         self._lock = threading.Lock()
         self._seen: dict[str, tuple] = {}   # path -> (size, mtime, first time seen so)
         self._pending: set[str] = set()     # paths to look at again
+        self._to_check: set[str] = set()    # paths a running full scan has yet to reach
+        self._scans_running = 0
         self._observer = None
         self._watches: dict[str, object] = {}  # normalised library path -> watch
         self._stop: Optional[threading.Event] = None
+
+    def status(self) -> dict:
+        """Safe from any thread: whether a scan is running and how many files await a look."""
+        with self._lock:
+            return {"scanning": self._scans_running > 0,
+                    "pending": len(self._pending | self._to_check)}
 
     # ---- rules
 
@@ -108,6 +116,17 @@ class Scanner:
                 return self.stable_seconds <= 0
             return now - seen[2] >= self.stable_seconds
 
+    def _can_skip_wait(self, path: str, st) -> bool:
+        """For a full scan: nothing has changed this file for a while, so it needs no settling.
+
+        A file a watcher event noted, or that had to be looked at again, always waits, because
+        a copied file can arrive with an old time.
+        """
+        with self._lock:
+            if path in self._pending:
+                return False
+        return time.time() - st.st_mtime >= self.stable_seconds
+
     def _forget(self, path: str) -> None:
         with self._lock:
             self._seen.pop(_norm(path), None)
@@ -120,7 +139,7 @@ class Scanner:
     # ---- one file
 
     def _consider(self, library: Library, path: str, st, row: Optional[FileRow],
-                  force: bool = False) -> None:
+                  force: bool = False, full_scan: bool = False) -> None:
         """Bring one file's row up to date. Raises _TryAgain if it should be revisited."""
         if self._owned(row):
             self._forget(path)
@@ -131,7 +150,8 @@ class Scanner:
                 and not (row.status == "queued" and nlink > 1)):
             self._forget(path)
             return
-        if not unchanged and not self._stable(path, st.st_size, st.st_mtime):
+        skipped_wait = not unchanged and full_scan and self._can_skip_wait(path, st)
+        if not unchanged and not skipped_wait and not self._stable(path, st.st_size, st.st_mtime):
             raise _TryAgain(path)
         try:
             with open(ext_path(path), "rb") as reader:
@@ -154,6 +174,9 @@ class Scanner:
                 return
             except OSError:
                 pass
+            # It may still be arriving, so it gets the wait it skipped before it counts as bad.
+            if skipped_wait and not self._stable(path, st.st_size, st.st_mtime):
+                raise _TryAgain(path) from exc
             logger.error("Could not read %s: %s", path, exc)
             self._write(row, library, path, st, "failed", UNREADABLE)
             self._forget(path)
@@ -180,7 +203,7 @@ class Scanner:
                                          reason, **details)
 
     def _process(self, library: Library, path: str, row: Optional[FileRow] = None,
-                 force: bool = False) -> bool:
+                 force: bool = False, full_scan: bool = False) -> bool:
         """Stat and consider one path. False when it should be revisited."""
         try:
             if row is None:
@@ -195,7 +218,7 @@ class Scanner:
                 return True
             except PermissionError:
                 return False
-            self._consider(library, path, st, row, force)
+            self._consider(library, path, st, row, force, full_scan)
             return True
         except _TryAgain:
             return False
@@ -234,6 +257,12 @@ class Scanner:
                     logger.warning("Could not read %s: %s", path, exc)
                     problems.append(path)
 
+    @staticmethod
+    def _needs_a_look(rows: dict, path: str, st) -> bool:
+        row = rows.get(_norm(path))
+        return (row is None or row.status == "missing"
+                or (row.size, row.mtime) != (st.st_size, st.st_mtime))
+
     def scan_library(self, library_id: int) -> None:
         library = next((l for l in self.db.list_libraries() if l.id == library_id), None)
         if library is None:
@@ -252,15 +281,30 @@ class Scanner:
         root = os.path.normpath(library.path)
         work = self._work_root(library)
         rows = {_norm(r.path): r for r in self.db.files_in_library(library.id)}
-        found: set[str] = set()
         problems: list = []
-        for path, st in self._find_files(root, work, problems):
-            found.add(_norm(path))
-            if not self._process(library, path):
-                self._add_pending(path)
-                continue
+        with self._lock:
+            self._scans_running += 1
+        to_check: set[str] = set()
+        try:
+            listing = list(self._find_files(root, work, problems))
+            found = {_norm(path) for path, _ in listing}
+            to_check = {path for path, st in listing if self._needs_a_look(rows, path, st)}
             with self._lock:
-                self._pending.discard(path)
+                self._to_check |= to_check
+            for path, _ in listing:
+                if self._stopping():
+                    break
+                settled = self._process(library, path, full_scan=True)
+                with self._lock:
+                    if settled:
+                        self._pending.discard(path)
+                    else:
+                        self._pending.add(path)
+                    self._to_check.discard(path)
+        finally:
+            with self._lock:
+                self._scans_running -= 1
+                self._to_check -= to_check
         if came_back and not self._stopping():
             self.reevaluate(library.id)  # its settings may have changed while it was away
         if self._stopping() or problems or not self._reachable(library):

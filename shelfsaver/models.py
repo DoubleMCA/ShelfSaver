@@ -59,6 +59,7 @@ class Run:
     swap_json: Optional[str] = None
     error: Optional[str] = None
     log_tail: Optional[str] = None
+    convert_seconds: Optional[float] = None
     saved_bytes: int = 0
 
 

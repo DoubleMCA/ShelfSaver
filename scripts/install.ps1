@@ -298,7 +298,7 @@ function Protect-DataFolder {
     Say "Only administrators can open $DataDir"
 }
 
-function Find-Tool([string]$name, $config) {
+function Find-ToolCandidates([string]$name, $config) {
     # Order: what config.json already says, then PATH, then WinGet's own folders.
     $candidates = @()
     $configured = $config.PSObject.Properties[$name]
@@ -313,13 +313,37 @@ function Find-Tool([string]$name, $config) {
         }
     }
     foreach ($c in $candidates) {
-        if ($c -and (Test-Path -LiteralPath $c)) { return (Resolve-RealPath $c) }
+        if ($c -and (Test-Path -LiteralPath $c)) { Resolve-RealPath $c }
+    }
+}
+
+function Find-Tool([string]$name, $config) {
+    return @(Find-ToolCandidates $name $config) | Select-Object -First 1
+}
+
+function Test-HasGpuEncoder([string]$exe) {
+    # An FFmpeg bundled with another app may be unable to use the graphics card at all.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $listing = & $exe -hide_banner -encoders 2>$null | Out-String
+        return ($LASTEXITCODE -eq 0 -and $listing -match '\bhevc_nvenc\b')
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Find-EncodingFFmpeg($config) {
+    foreach ($candidate in @(Find-ToolCandidates 'ffmpeg' $config)) {
+        if ($candidate -and (Test-HasGpuEncoder $candidate)) { return $candidate }
     }
     return $null
 }
 
 function Get-UsableTool([string]$name, $config) {
-    $path = Find-Tool $name $config
+    $path = if ($name -eq 'ffmpeg') { Find-EncodingFFmpeg $config } else { Find-Tool $name $config }
     if (-not $path) { return $null }
     $inApp = $path.StartsWith($AppDir + '\', [StringComparison]::OrdinalIgnoreCase)
     if (-not $inApp -and (Test-SystemRuns $path '-version')) { return $path }
@@ -385,8 +409,11 @@ try {
     }
 
     Step 'Checking FFmpeg'
-    if (-not (Find-Tool 'ffmpeg' $config) -or -not (Find-Tool 'ffprobe' $config)) {
+    if (-not (Find-EncodingFFmpeg $config) -or -not (Find-Tool 'ffprobe' $config)) {
         Install-WithWinget 'Gyan.FFmpeg' 'FFmpeg'
+    }
+    if ((Find-Tool 'ffmpeg' $config) -and -not (Find-EncodingFFmpeg $config)) {
+        Fail "The FFmpeg on this PC can't convert video on the NVIDIA graphics card. Install the full version by running: winget install Gyan.FFmpeg. Then run this again."
     }
     $ffmpeg = Get-UsableTool 'ffmpeg' $config
     $ffprobe = Get-UsableTool 'ffprobe' $config

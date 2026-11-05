@@ -132,3 +132,14 @@ def test_convert_carries_audio_removal_when_option_on():
 
 def test_option_off_never_removes():
     assert decide(info(streams=eng_spa(), video_bitrate=30_000_000), "medium", False).remove_audio == ()
+
+
+@pytest.mark.parametrize("lang", ["en-US", "en-GB", "eng-US", "EN_us", " en-au "])
+def test_english_with_a_region_counts_as_english(lang):
+    tracks = audio(("eng", None, True), (lang, "Commentary", False), ("spa", None, False))
+    assert audio_to_remove(tracks) == (3,)
+
+
+@pytest.mark.parametrize("lang", ["end", "enm", "ena-US"])
+def test_tags_that_only_start_like_english_are_not_english(lang):
+    assert audio_to_remove(audio(("eng", None, True), (lang, None, False))) == (2,)

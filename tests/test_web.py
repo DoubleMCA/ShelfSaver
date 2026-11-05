@@ -19,6 +19,7 @@ from shelfsaver.__main__ import acquire_instance_lock
 from shelfsaver.config import Config
 from shelfsaver.db import Database, ensure_mcp_token
 from shelfsaver.scanner import Scanner
+from shelfsaver.web import app as app_module
 from shelfsaver.web.app import SESSION_COOKIE, create_app
 from shelfsaver.worker import Worker, _dump_swap
 from tests.helpers import make_video
@@ -64,6 +65,10 @@ class FakeScanner:
     def __init__(self):
         self.calls = []
         self.happened = threading.Event()
+        self.state = {"scanning": False, "pending": 0}
+
+    def status(self):
+        return self.state
 
     def _note(self, *call):
         self.calls.append(call)
@@ -210,7 +215,7 @@ def test_add_library_queues_a_scan(authed, parts, tmp_path):
     r = add_library(authed, folder, name="  Movies  ")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["name"] == "Movies" and body["level"] == "medium" and body["english_only"] is True
+    assert body["name"] == "Movies" and body["level"] == "medium" and body["english_only"] is False
     scanner.wait()
     assert ("scan", body["id"]) in scanner.calls
     assert ("watches",) in scanner.calls
@@ -310,7 +315,7 @@ def test_level_change_triggers_reevaluate(authed, parts, tmp_path):
     scanner.wait()
     assert ("reevaluate", lib["id"]) in scanner.calls
     scanner.calls.clear()
-    authed.patch(f"/api/libraries/{lib['id']}", json={"english_only": False})
+    authed.patch(f"/api/libraries/{lib['id']}", json={"english_only": True})
     scanner.wait()
     assert ("reevaluate", lib["id"]) in scanner.calls
     scanner.calls.clear()
@@ -995,3 +1000,271 @@ def test_pages_need_no_internet():
 def test_add_library_dialog_starts_with_english_only_off():
     app_js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "englishCheckbox(false)" in app_js and "englishCheckbox(true)" not in app_js
+
+
+# ---- files the scanner decided about, which never had a run
+
+def file_only(db, lib, name, status, reason=None, when=None, codec="hevc"):
+    row = db.upsert_file(lib.id, str(Path("library") / name), 2_000_000_000, 1.0, status, reason,
+                         codec=codec, resolution="1920x1080")
+    if when is not None:
+        db._exec("UPDATE files SET updated_at=? WHERE id=?", (when, row.id))
+    return row
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("skipped", "Already x265"), ("skipped", "Already small"), ("skipped", "Dolby Vision, left as is"),
+    ("skipped", "Linked to another copy"), ("failed", "Couldn't read this file"),
+    ("waiting_in_use", "Waiting, file is in use"), ("missing", None)])
+def test_history_shows_files_that_never_had_a_run(authed, parts, status, reason):
+    db, *_ = parts
+    lib = db.add_library("Movies", "library", "medium", False)
+    f = file_only(db, lib, "Film.mkv", status, reason)
+    rows = authed.get("/api/history").json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "file" and row["id"] == f"file-{f.id}" and row["file_id"] == f.id
+    assert row["name"] == "Film.mkv" and row["library"] == "Movies"
+    assert row["status"] == status and row["reason"] == reason
+    assert row["was"] == {"size": 2_000_000_000, "format": "x265", "bitrate": None}
+    assert row["now"] == {"size": None, "format": None, "bitrate": None}
+    assert row["state"] is None and row["saved_bytes"] == 0
+    details = authed.get(f"/api/files/{f.id}").json()
+    assert details["runs"] == [] and details["file"]["reason"] == reason
+
+
+def test_a_file_with_no_known_format_shows_none_rather_than_a_made_up_one(authed, parts):
+    db, *_ = parts
+    lib = db.add_library("Movies", "library", "medium", False)
+    file_only(db, lib, "bad.mkv", "failed", "Couldn't read this file", codec=None)
+    assert authed.get("/api/history").json()[0]["was"]["format"] is None
+
+
+def test_history_leaves_out_queued_and_working_files(authed, parts):
+    db, *_ = parts
+    lib = db.add_library("Movies", "library", "medium", False)
+    file_only(db, lib, "a.mkv", "queued")
+    file_only(db, lib, "b.mkv", "working")
+    assert authed.get("/api/history").json() == []
+
+
+def test_history_sorts_and_pages_across_both_kinds(authed, parts):
+    db, *_ = parts
+    lib = db.add_library("Movies", "library", "medium", False)
+    other = db.add_library("TV", "other", "medium", False)
+    for number, when in enumerate((400.0, 200.0)):
+        done = db.upsert_file(lib.id, f"library/run{number}.mkv", 500, 1.0, "converted")
+        run = db.start_run(done.id, 1000, "H.264", None, "why")
+        db.update_run(run.id, state="done", started_at=when - 50, finished_at=when)
+    file_only(db, lib, "newest.mkv", "skipped", "Already x265", 500.0)
+    file_only(db, lib, "middle.mkv", "failed", "Couldn't read this file", 300.0)
+    file_only(db, other, "elsewhere.mkv", "skipped", "Already x265", 100.0)
+
+    def names(**params):
+        return [r["name"] for r in authed.get("/api/history", params=params).json()]
+
+    everything = ["newest.mkv", "run0.mkv", "middle.mkv", "run1.mkv", "elsewhere.mkv"]
+    assert names() == everything
+    assert names(limit=2) == everything[:2]
+    assert names(limit=2, offset=2) == everything[2:4]
+    assert names(limit=2, offset=4) == everything[4:]
+    assert names(library_id=other.id) == ["elsewhere.mkv"]
+    assert names(library_id=lib.id, limit=1, offset=1) == ["run0.mkv"]
+
+
+def test_history_filters_on_the_server_so_paging_can_reach_every_match(authed, parts):
+    db, *_ = parts
+    lib = db.add_library("Movies", "library", "medium", False)
+    file_only(db, lib, "old-failure.mkv", "failed", "Couldn't read this file", 1.0)
+    for number in range(5):
+        file_only(db, lib, f"s{number}.mkv", "skipped", "Already x265", 100.0 + number)
+    done = db.upsert_file(lib.id, "library/done.mkv", 500, 1.0, "converted")
+    db.update_run(db.start_run(done.id, 1000, "H.264", None, "why").id, state="done",
+                  finished_at=50.0)
+    stopped = db.upsert_file(lib.id, "library/stopped.mkv", 500, 1.0, "failed", "x")
+    db.update_run(db.start_run(stopped.id, 1000, "H.264", None, "why").id, state="interrupted",
+                  error="Interrupted", finished_at=60.0)
+
+    def names(show, **params):
+        rows = authed.get("/api/history", params={"show": show, **params}).json()
+        return [r["name"] for r in rows]
+
+    assert names("attention", limit=2) == ["stopped.mkv", "old-failure.mkv"]
+    assert names("converted") == ["done.mkv"]
+    assert names("skipped", limit=2, offset=1) == ["s3.mkv", "s2.mkv"]
+    assert len(names("all")) == 8
+    assert authed.get("/api/history", params={"show": "nonsense"}).status_code == 400
+
+
+def test_try_again_is_offered_for_a_scan_failure_but_not_a_skip(authed, parts):
+    db, worker, *_ = parts
+    lib = db.add_library("Movies", "library", "medium", False)
+    bad = file_only(db, lib, "bad.mkv", "failed", "Couldn't read this file", codec=None)
+    assert authed.post(f"/api/files/{bad.id}/retry").status_code == 200
+    assert worker.calls == [("retry", bad.id)]
+    skipped = file_only(db, lib, "fine.mkv", "skipped", "Already x265")
+    assert authed.post(f"/api/files/{skipped.id}/retry").status_code == 400
+
+
+# ---- English-only starts off
+
+def test_english_only_is_off_unless_asked_for(authed, tmp_path):
+    body = add_library(authed, make_folder(tmp_path, "movies")).json()
+    assert body["english_only"] is False
+    body = add_library(authed, make_folder(tmp_path, "tv"), name="TV", english_only=True).json()
+    assert body["english_only"] is True
+
+
+# ---- held size on the status poll
+
+def counted_held_size(monkeypatch, sizes):
+    calls = []
+
+    def fake(paths):
+        calls.append(list(paths))
+        return sizes[0]
+
+    monkeypatch.setattr(swap, "held_size", fake)
+    return calls
+
+
+def test_status_does_not_measure_holding_on_every_poll(authed, monkeypatch):
+    calls = counted_held_size(monkeypatch, [111])
+    for _ in range(4):
+        assert authed.get("/api/status").json()["held_bytes"] == 111
+    assert len(calls) == 1
+
+
+def test_held_size_is_measured_again_after_the_cache_runs_out(authed, monkeypatch):
+    sizes = [111]
+    calls = counted_held_size(monkeypatch, sizes)
+    assert authed.get("/api/status").json()["held_bytes"] == 111
+    sizes[0] = 222
+    assert authed.get("/api/status").json()["held_bytes"] == 111
+    monkeypatch.setattr(app_module, "HELD_CACHE_SECONDS", 0.0)
+    assert authed.get("/api/status").json()["held_bytes"] == 222
+    assert len(calls) == 2
+
+
+def test_clearing_holding_shows_at_once_on_the_next_poll(authed, tmp_path):
+    folder = make_folder(tmp_path, "movies")
+    add_library(authed, folder)
+    hold_a_file(folder)
+    assert authed.get("/api/status").json()["held_bytes"] == 2048
+    assert authed.post("/api/holding/clear", json={"confirm": True}).status_code == 200
+    assert authed.get("/api/status").json()["held_bytes"] == 0
+
+
+def test_adding_a_library_is_measured_at_once(authed, tmp_path):
+    assert authed.get("/api/status").json()["held_bytes"] == 0
+    folder = make_folder(tmp_path, "movies")
+    hold_a_file(folder)
+    add_library(authed, folder)
+    assert authed.get("/api/status").json()["held_bytes"] == 2048
+
+
+def test_settings_always_measure_holding_afresh(authed, tmp_path):
+    folder = make_folder(tmp_path, "movies")
+    add_library(authed, folder)
+    assert authed.get("/api/status").json()["held_bytes"] == 0
+    hold_a_file(folder)
+    assert authed.get("/api/settings").json()["held_bytes"] == 2048
+    assert authed.get("/api/status").json()["held_bytes"] == 2048
+
+
+# ---- held files stay visible and clearable after their library is removed
+
+def two_volumes(tmp_path, monkeypatch):
+    a, b = make_folder(tmp_path, "vol_a/movies"), make_folder(tmp_path, "vol_b/movies")
+    monkeypatch.setattr(swap, "_volume_root",
+                        lambda path: str(tmp_path / ("vol_a" if "vol_a" in str(path)
+                                                     else "vol_b")) + os.sep)
+    return a, b
+
+
+def test_removing_a_library_keeps_its_held_files_visible_and_clearable(
+        authed, tmp_path, monkeypatch):
+    a, b = two_volumes(tmp_path, monkeypatch)
+    lib = add_library(authed, a).json()
+    add_library(authed, b, name="Other")
+    held = hold_a_file(a)
+    assert authed.delete(f"/api/libraries/{lib['id']}").status_code == 200
+    settings = authed.get("/api/settings").json()
+    assert settings["held_bytes"] == 2048
+    assert str(tmp_path / "vol_a") in settings["held_drives"]
+    assert authed.get("/api/status").json()["held_bytes"] == 2048
+    body = authed.post("/api/holding/clear", json={"confirm": True}).json()
+    assert body["freed_bytes"] == 2048 and not held.exists()
+    assert str(tmp_path / "vol_a") in body["drives"]
+    assert body["held_bytes"] == 0
+
+
+def test_a_library_from_before_this_list_existed_is_remembered_on_removal(
+        authed, parts, tmp_path, monkeypatch):
+    db, *_ = parts
+    a, _ = two_volumes(tmp_path, monkeypatch)
+    lib = db.add_library("Old", str(a), "low", False)  # never went through the add route
+    assert db.held_volumes() == []
+    hold_a_file(a)
+    assert authed.delete(f"/api/libraries/{lib.id}").status_code == 200
+    assert authed.get("/api/settings").json()["held_bytes"] == 2048
+
+
+def test_clear_is_refused_when_a_library_on_a_remembered_volume_is_busy(
+        authed, parts, tmp_path, monkeypatch):
+    db, *_ = parts
+    a, _ = two_volumes(tmp_path, monkeypatch)
+    first = add_library(authed, a).json()
+    held = hold_a_file(a)
+    second_folder = make_folder(tmp_path, "vol_a/tv")
+    second = add_library(authed, second_folder, name="TV").json()
+    assert authed.delete(f"/api/libraries/{first['id']}").status_code == 200
+    f = db.upsert_file(second["id"], str(second_folder / "x.mkv"), 1, 1.0, "working")
+    db.start_run(f.id, 1, "H.264", None, "why")
+    r = authed.post("/api/holding/clear", json={"confirm": True})
+    assert r.status_code == 400 and held.exists()
+
+
+def test_clear_is_refused_while_a_run_from_a_removed_library_is_active(
+        authed, parts, tmp_path, monkeypatch):
+    db, *_ = parts
+    a, _ = two_volumes(tmp_path, monkeypatch)
+    lib = add_library(authed, a).json()
+    held = hold_a_file(a)
+    f = db.upsert_file(lib["id"], str(a / "x.mkv"), 1, 1.0, "failed")
+    run = db.start_run(f.id, 1, "H.264", None, "why")
+    db.update_run(run.id, state="swapping")
+    db.remove_library(lib["id"])  # as if it slipped past the busy check
+    r = authed.post("/api/holding/clear", json={"confirm": True})
+    assert r.status_code == 400 and held.exists()
+
+
+# ---- the scanner on the status poll
+
+def test_status_passes_on_the_scanners_progress(authed, parts):
+    _, _, scanner, _ = parts
+    assert authed.get("/api/status").json()["scanner"] == {"scanning": False, "pending": 0}
+    scanner.state = {"scanning": True, "pending": 1204}
+    assert authed.get("/api/status").json()["scanner"] == {"scanning": True, "pending": 1204}
+
+
+# ---- wording on the pages
+
+def test_pause_says_the_current_file_will_start_over():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "will start over when you resume" in app_js
+    assert "will start over when you resume" in index
+
+
+def test_home_says_when_it_is_looking_through_the_libraries():
+    assert "Looking through your libraries" in (STATIC / "app.js").read_text(encoding="utf-8")
+
+
+def test_conversion_time_comes_from_the_recorded_encode_time():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "run.convert_seconds" in app_js and "finished_at - run.started_at" not in app_js
+
+
+def test_offline_notice_says_the_library_drive_is_offline():
+    assert "library drive is offline" in (STATIC / "app.js").read_text(encoding="utf-8")

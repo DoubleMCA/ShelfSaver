@@ -379,3 +379,99 @@ def test_settings_changed_while_offline_apply_when_it_returns(env):
     env.restore_root()
     env.scanner.scan_library(env.lib.id)
     assert env.status(big) == "queued"
+
+
+# ---- the wait for a file to settle, on a full scan
+
+def age(path, seconds=3600):
+    then = time.time() - seconds
+    os.utime(path, (then, then))
+    return path
+
+
+def test_full_scan_does_not_wait_for_a_file_untouched_for_a_while(clock_env):
+    big = age(clock_env.bloated())
+    clock_env.scanner.scan_library(clock_env.lib.id)
+    assert clock_env.status(big) == "queued"
+    assert clock_env.scanner.status() == {"scanning": False, "pending": 0}
+
+
+def test_full_scan_still_waits_for_a_recently_changed_file(clock_env):
+    big = clock_env.bloated()
+    clock_env.scanner.scan_library(clock_env.lib.id)
+    assert clock_env.status(big) is None
+    assert clock_env.scanner.status()["pending"] == 1
+    clock_env.clock.advance(61)
+    clock_env.scanner.check_pending()
+    assert clock_env.status(big) == "queued"
+    assert clock_env.scanner.status()["pending"] == 0
+
+
+def test_dropped_file_with_an_old_time_still_waits(clock_env):
+    big = age(clock_env.bloated())
+    clock_env.scanner._add_pending(str(big))  # what a watcher event does
+    clock_env.scanner.check_pending()
+    assert clock_env.status(big) is None
+    clock_env.scanner.scan_library(clock_env.lib.id)  # a full scan must not cut the wait short
+    assert clock_env.status(big) is None
+    clock_env.clock.advance(61)
+    clock_env.scanner.check_pending()
+    assert clock_env.status(big) == "queued"
+
+
+def test_old_file_that_cant_be_read_waits_before_it_is_failed(clock_env):
+    bad = clock_env.root / "x.mkv"
+    bad.write_bytes(b"still being copied")
+    age(bad)
+    clock_env.scanner.scan_library(clock_env.lib.id)
+    assert clock_env.status(bad) is None
+    assert clock_env.scanner.status()["pending"] == 1
+    clock_env.clock.advance(61)
+    clock_env.scanner.check_pending()
+    assert clock_env.status(bad) == "failed" and clock_env.reason(bad) == UNREADABLE
+
+
+def test_status_counts_the_files_a_scan_still_has_to_check(clock_env, monkeypatch):
+    import shelfsaver.scanner as scanner_module
+    age(clock_env.bloated("a.mkv"))
+    age(clock_env.efficient("b.mkv"))
+    seen = []
+    real_probe = scanner_module.probe
+
+    def watching_probe(*args):
+        seen.append(clock_env.scanner.status())
+        return real_probe(*args)
+
+    monkeypatch.setattr(scanner_module, "probe", watching_probe)
+    clock_env.scanner.scan_library(clock_env.lib.id)
+    assert seen == [{"scanning": True, "pending": 2}, {"scanning": True, "pending": 1}]
+    assert clock_env.scanner.status() == {"scanning": False, "pending": 0}
+
+
+def test_status_does_not_count_files_already_up_to_date(env, monkeypatch):
+    seen = []
+    real_consider = env.scanner._consider
+
+    def watching(*args, **kwargs):
+        seen.append(env.scanner.status())
+        return real_consider(*args, **kwargs)
+
+    monkeypatch.setattr(env.scanner, "_consider", watching)
+    env.scanner.scan_library(env.lib.id)
+    assert seen == [{"scanning": True, "pending": 0}]
+
+
+def test_a_stopped_scan_leaves_nothing_counted(clock_env, monkeypatch):
+    age(clock_env.bloated("a.mkv"))
+    age(clock_env.bloated("b.mkv"))
+    stop = threading.Event()
+    clock_env.scanner._stop = stop
+    real_consider = clock_env.scanner._consider
+
+    def stop_after_one(*args, **kwargs):
+        stop.set()
+        return real_consider(*args, **kwargs)
+
+    monkeypatch.setattr(clock_env.scanner, "_consider", stop_after_one)
+    clock_env.scanner.scan_library(clock_env.lib.id)
+    assert clock_env.scanner.status() == {"scanning": False, "pending": 0}
