@@ -38,11 +38,23 @@ def _tags(raw: dict) -> dict:
     return {str(k).lower(): v for k, v in (raw.get("tags") or {}).items()}
 
 
+def _usable_rate(value) -> bool:
+    try:
+        num, _, den = str(value).partition("/")
+        return float(num) > 0 and float(den or 1) > 0
+    except ValueError:
+        return False
+
+
 def _is_cover_art(raw: dict, kind: str) -> bool:
     if (raw.get("disposition") or {}).get("attached_pic"):
         return True
-    if kind == "attachment":
-        return str(_tags(raw).get("mimetype", "")).lower().startswith("image/")
+    if str(_tags(raw).get("mimetype", "")).lower().startswith("image/"):
+        return True
+    if kind == "video" and raw.get("codec_name") in ("mjpeg", "png", "bmp"):
+        has_rate = _usable_rate(raw.get("avg_frame_rate")) or _usable_rate(raw.get("r_frame_rate"))
+        has_duration = (_float(raw.get("duration")) or 0) > 0
+        return not (has_rate and has_duration)
     return False
 
 

@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from shelfsaver.probe import ProbeError, parse_probe, probe
@@ -52,6 +54,38 @@ def test_probe_flags_cover_art(tmp_path, name):
     info = probe(p, "ffprobe")
     assert any(s.is_cover_art for s in info.streams)
     assert info.width == 1920  # main video, not the cover image
+
+
+def test_probe_flags_cover_art_in_reencoded_mkv_output(tmp_path):
+    # Matroska output reports cover art as an mjpeg video with a mimetype tag, no attached_pic.
+    src = make_video(tmp_path / "s.mp4", seconds=2, size="640x360", cover_art=True)
+    out = tmp_path / "o.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-map", "0", "-c", "copy", str(out)],
+                   check=True)
+    info = probe(out, "ffprobe")
+    covers = [s for s in info.streams if s.is_cover_art]
+    assert len(covers) == 1 and covers[0].codec == "mjpeg"
+    assert info.video_codec == "h264" and info.width == 640
+
+
+def test_cover_art_listed_first_is_never_the_main_video():
+    cover = {"index": 0, "codec_type": "video", "codec_name": "mjpeg", "width": 64, "height": 64,
+             "tags": {"MIMETYPE": "image/jpeg"}}
+    video = {"index": 1, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080,
+             "pix_fmt": "yuv420p", "avg_frame_rate": "25/1"}
+    info = parse_probe({"format": {"duration": "10.0"}, "streams": [cover, video]}, "x.mkv", 1000)
+    assert info.video_codec == "hevc" and info.width == 1920
+    assert [s.is_cover_art for s in info.streams] == [True, False]
+
+
+@pytest.mark.parametrize("extra", [{}, {"avg_frame_rate": "0/0", "r_frame_rate": "0/0"}])
+def test_still_image_codec_without_frame_rate_is_cover_art(extra):
+    still = {"index": 0, "codec_type": "video", "codec_name": "png", "width": 64, "height": 64, **extra}
+    video = {"index": 1, "codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720,
+             "avg_frame_rate": "25/1", "r_frame_rate": "25/1", "duration": "10.0"}
+    info = parse_probe({"format": {"duration": "10.0"}, "streams": [still, video]}, "x.mkv", 1000)
+    assert info.streams[0].is_cover_art and not info.streams[1].is_cover_art
+    assert info.width == 1280
 
 
 def _raw(**video):

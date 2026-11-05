@@ -132,8 +132,7 @@ def test_real_encode_keeps_tracks_chapters_and_cover_art(tmp_path):
     kinds = [s.kind for s in result.streams]
     assert result.video_codec == "hevc"
     assert kinds.count("audio") == 2 and kinds.count("subtitle") == 1
-    # Matroska stores cover art as an attachment that ffprobe reports as a plain mjpeg video.
-    assert any(s.codec == "mjpeg" for s in result.streams)
+    assert any(s.is_cover_art for s in result.streams)
     chapters = json.loads(subprocess.run(
         ["ffprobe", "-v", "error", "-print_format", "json", "-show_chapters", str(out)],
         capture_output=True, check=True).stdout)["chapters"]
