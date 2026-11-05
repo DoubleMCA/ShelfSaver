@@ -3,7 +3,13 @@ import subprocess
 import pytest
 
 from shelfsaver.probe import ProbeError, parse_probe, probe
-from tests.helpers import make_video
+from tests.helpers import make_unreadable_subtitle_video, make_video
+
+
+def test_probe_reports_no_codec_for_an_unreadable_subtitle(tmp_path):
+    p = make_unreadable_subtitle_video(tmp_path / "u.mkv", size="320x240", seconds=1)
+    subtitles = [s for s in probe(p, "ffprobe").streams if s.kind == "subtitle"]
+    assert [s.codec for s in subtitles] == [None]
 
 
 def test_probe_reads_languages_and_codec(tmp_path):

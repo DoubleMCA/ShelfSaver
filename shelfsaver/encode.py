@@ -13,6 +13,7 @@ from .quality import LEVELS
 
 LOG_TAIL_BYTES = 8 * 1024
 KILL_AFTER_SECONDS = 10
+ENCODER_CHECK_SECONDS = 30
 
 MP4_EXTENSIONS = (".mp4", ".m4v")
 MP4_AUDIO = frozenset({"aac", "ac3", "eac3", "mp3", "opus", "flac", "alac"})
@@ -117,6 +118,25 @@ def build_command(info: MediaInfo, decision: Decision, level: str,
     cmd += ["-map_metadata", "0", "-map_chapters", "0",
             "-max_muxing_queue_size", "4096", str(output)]
     return cmd
+
+
+def encoder_works(ffmpeg) -> bool:
+    """Whether the graphics card can encode one blank frame, with no video file involved."""
+    cmd = [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", "color=size=640x360:rate=25",
+           "-frames:v", "1", "-c:v", "hevc_nvenc", "-f", "null", "-"]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, creationflags=flags)
+    except OSError:
+        return False
+    kill_with_app(proc)
+    try:
+        return proc.wait(timeout=ENCODER_CHECK_SECONDS) == 0
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return False
 
 
 def run_ffmpeg(cmd: list, duration: float, on_progress: Callable[[float], None],

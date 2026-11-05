@@ -5,11 +5,25 @@ from pathlib import Path
 
 import pytest
 
-from shelfsaver.encode import build_command, output_extension, run_ffmpeg
+from shelfsaver.encode import build_command, encoder_works, output_extension, run_ffmpeg
 from shelfsaver.models import Stream
 from shelfsaver.probe import probe
 from shelfsaver.quality import LEVELS
 from tests.helpers import convert, eng_spa, info, make_video, strip
+
+
+@pytest.mark.gpu
+def test_encoder_check_passes_on_a_working_graphics_card():
+    assert encoder_works("ffmpeg") is True
+
+
+def test_encoder_check_fails_when_ffmpeg_reports_an_error():
+    # Python rejects FFmpeg's arguments and exits with an error, as a failed encode would.
+    assert encoder_works(sys.executable) is False
+
+
+def test_encoder_check_fails_when_ffmpeg_cannot_start(tmp_path):
+    assert encoder_works(tmp_path / "missing.exe") is False
 
 S, O = Path("in.mkv"), Path("out.mkv")
 

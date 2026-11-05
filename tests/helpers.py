@@ -55,6 +55,15 @@ def make_video(path, seconds=3, size="1920x1080", vcodec="libx264", crf=10,
     return path
 
 
+def make_unreadable_subtitle_video(path, **kwargs):
+    """A video whose one subtitle track is in a format FFmpeg can't identify."""
+    path = make_video(path, subs=[("eng", "Full")], **kwargs)
+    data = path.read_bytes()
+    assert data.count(b"S_TEXT/UTF8") == 1
+    path.write_bytes(data.replace(b"S_TEXT/UTF8", b"S_TEXT/XXXX"))
+    return path
+
+
 def _build(out, seconds, size, vcodec, crf, audio, subs, interlaced, hdr, cover_art):
     work = cache_dir()
     args = ["ffmpeg", "-y", "-v", "error",

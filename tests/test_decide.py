@@ -1,6 +1,7 @@
 import pytest
 
 from shelfsaver.decide import audio_to_remove, decide
+from shelfsaver.models import Stream
 from shelfsaver.quality import LEVELS, MIN_SAVINGS, resolution_bucket
 from tests.helpers import audio, eng_spa, info
 
@@ -69,6 +70,34 @@ def test_precedence_hardlink_then_read_only_then_no_video_then_dv():
     assert decide(i, "high", False, read_only=True).reason == "Read-only file"
     assert decide(i, "high", False).reason == "No video"
     assert decide(info(dolby_vision=True), "high", False).reason == "Dolby Vision, left as is"
+
+
+UNREADABLE_SUBTITLES = "Unreadable subtitles, left as is"
+
+
+def _with_subtitle(codec, tracks=()):
+    subtitle = Stream(9, "subtitle", codec, "eng", None, False, False)
+    return (*(tracks or audio(("eng", None, True))), subtitle)
+
+
+def test_unreadable_subtitle_skips_a_file_worth_converting():
+    d = decide(info(streams=_with_subtitle(None)), "medium", False)
+    assert d.action == "skip" and d.reason == UNREADABLE_SUBTITLES
+
+
+def test_readable_subtitle_still_converts():
+    assert decide(info(streams=_with_subtitle("subrip")), "medium", False).action == "convert"
+
+
+def test_unreadable_subtitle_skips_a_soundtrack_removal():
+    streams = _with_subtitle(None, eng_spa())
+    d = decide(info(video_codec="hevc", streams=streams), "medium", True)
+    assert d.action == "skip" and d.reason == UNREADABLE_SUBTITLES
+
+
+def test_unreadable_subtitle_keeps_the_usual_reason_when_nothing_would_be_done():
+    d = decide(info(video_codec="hevc", streams=_with_subtitle(None)), "medium", False)
+    assert d.action == "skip" and d.reason == "Already x265"
 
 
 def test_removes_non_english():

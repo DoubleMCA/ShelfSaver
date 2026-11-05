@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .decide import decide
-from .encode import EncodeResult, build_command, output_extension, run_ffmpeg
+from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
 from .models import RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import UNREADABLE, ProbeError, file_details, probe
 from .swap import (
@@ -724,6 +724,12 @@ class Worker:
             self._failed_encodes.append(job.file.id)
             failed = list(self._failed_encodes)
         if len(failed) >= ENCODER_FAILURE_LIMIT:
+            if encoder_works(self.config.ffmpeg):
+                logger.warning("The graphics card works, so these files are the problem: %s",
+                               failed)
+                with self._lock:
+                    self._failed_encodes = []
+                return
             logger.error("Conversions keep failing, so pausing")
             self.db.requeue(failed)
             self.pause(BREAKER_MESSAGE)

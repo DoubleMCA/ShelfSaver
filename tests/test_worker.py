@@ -24,7 +24,7 @@ from shelfsaver.probe import probe
 from shelfsaver.scanner import Scanner
 from shelfsaver.swap import FileInUse, TargetExists, UnexpectedSwapState
 from shelfsaver.worker import GB, IN_USE_RETRY_SECONDS, TARGET_TAKEN, WAITING_IN_USE, Worker
-from tests.helpers import convert, eng_spa, info, make_video
+from tests.helpers import convert, eng_spa, info, make_unreadable_subtitle_video, make_video
 
 SIZE = "640x360"
 LOTS_OF_ROOM = 10_000 * GB
@@ -71,6 +71,9 @@ class Env:
         self.encodes = 0
         self.encode_output = None  # kwargs for make_video; None means a good smaller file
         monkeypatch.setattr(worker_module, "run_ffmpeg", self._fake_encode)
+        self.card_works = True
+        self.card_checks = 0
+        monkeypatch.setattr(worker_module, "encoder_works", self._check_card)
         self.ids = []
         self.lib_file = None
         self.original_bytes = None
@@ -78,6 +81,10 @@ class Env:
     def _free_bytes(self, path):
         inside_scratch = Path(path).is_relative_to(self.scratch)
         return self.free["scratch" if inside_scratch else "library"]
+
+    def _check_card(self, ffmpeg):
+        self.card_checks += 1
+        return self.card_works
 
     def _fake_encode(self, cmd, duration, on_progress, should_stop):
         self.encodes += 1
@@ -466,7 +473,42 @@ def test_offline_library_is_left_alone_and_other_libraries_continue(env):
 
 # ---- The three-failure breaker ----
 
+def test_three_failures_with_a_working_card_fail_only_those_files(env):
+    for name in ("a.mkv", "b.mkv", "c.mkv", "d.mkv"):
+        env.queue_video(name=name)
+    env.fail_encodes()
+    [env.worker.process_one() for _ in range(3)]
+    assert env.worker.status()["state"] == "idle"
+    assert env.card_checks == 1
+    assert [env.db.get_file(i).status for i in env.ids] == ["failed", "failed", "failed", "queued"]
+    env.use_good_encode()
+    assert env.worker.process_one() is True
+    assert env.db.get_file(env.ids[3]).status == "converted"
+
+
+def test_three_more_failures_check_the_card_again(env):
+    for name in ("a.mkv", "b.mkv", "c.mkv", "d.mkv", "e.mkv", "f.mkv"):
+        env.queue_video(name=name)
+    env.fail_encodes()
+    [env.worker.process_one() for _ in range(5)]
+    assert env.card_checks == 1
+    env.worker.process_one()
+    assert env.card_checks == 2
+
+
+def test_unreadable_subtitles_skip_a_queued_file_without_touching_it(env):
+    path = make_unreadable_subtitle_video(env.lib / "odd.mkv", seconds=2, size=SIZE)
+    original = path.read_bytes()
+    row = env.queue(path)
+    env.worker.process_one()
+    after = env.db.get_file(row.id)
+    assert after.status == "skipped" and after.reason == "Unreadable subtitles, left as is"
+    assert env.encodes == 0 and path.read_bytes() == original
+    assert env.worker.status()["state"] == "idle"
+
+
 def test_three_encoder_failures_pause_and_requeue(env):
+    env.card_works = False
     for name in ("a.mkv", "b.mkv", "c.mkv", "d.mkv"):
         env.queue_video(name=name)
     env.fail_encodes()
@@ -485,6 +527,7 @@ def test_clean_exit_with_an_unreadable_result_counts_as_an_encoder_failure(env):
         Path(cmd[-1]).write_bytes(b"not a video")
         return EncodeResult(0, False, "looked fine")
 
+    env.card_works = False
     env.use_encode(garbage)
     for name in ("a.mkv", "b.mkv", "c.mkv"):
         env.queue_video(name=name)
@@ -561,6 +604,7 @@ def test_ffmpeg_that_will_not_start_counts_as_an_encoder_failure(env):
     def missing(cmd, duration, on_progress, should_stop):
         raise FileNotFoundError("ffmpeg")
 
+    env.card_works = False  # the card check needs FFmpeg too
     env.use_encode(missing)
     for name in ("a.mkv", "b.mkv", "c.mkv"):
         env.queue_video(name=name)

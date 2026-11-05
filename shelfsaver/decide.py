@@ -66,10 +66,14 @@ def decide(info: MediaInfo, level: str, english_only: bool,
         if info.video_bitrate is not None and info.video_bitrate < mbps * 1_000_000:
             skip = ("Already small", "Already uses little data for its resolution")
 
-    if skip:
-        if removal:
-            return Decision("strip_only", skip[0], removal,
-                            "Only the extra-language audio tracks can be removed")
+    if skip and not removal:
         return _skip(*skip)
+    # FFmpeg can't write a track it can't identify, so any new file would fail.
+    if any(s.kind == "subtitle" and not s.codec for s in info.streams):
+        return _skip("Unreadable subtitles, left as is",
+                     "Some subtitle tracks are in a format that can't be carried over")
+    if skip:
+        return Decision("strip_only", skip[0], removal,
+                        "Only the extra-language audio tracks can be removed")
     return Decision("convert", "Worth converting", removal,
                     "Uses far more data than it needs at this resolution")
