@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shelfsaver"
+version = "0.1.0"
+description = "Watches video library folders and converts worthwhile files to x265 on the GPU."
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["fastapi", "uvicorn", "watchdog", "mcp"]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.setuptools.packages.find]
+include = ["shelfsaver*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
