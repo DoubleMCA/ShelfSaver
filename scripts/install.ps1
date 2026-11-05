@@ -497,8 +497,8 @@ try {
         Remove-NetFirewallRule -DisplayName $RuleName
     }
     New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Protocol TCP `
-        -LocalPort $Port -Profile Any | Out-Null
-    Say "Port $Port is open on all networks."
+        -LocalPort $Port -Profile Domain,Private,Public | Out-Null
+    Say "Port $Port is open on Domain, Private and Public networks."
 
     Step 'Starting ShelfSaver'
     Start-ScheduledTask -TaskName $TaskName

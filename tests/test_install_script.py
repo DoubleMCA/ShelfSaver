@@ -67,5 +67,4 @@ def test_setup_stops_with_a_plain_message_when_no_ffmpeg_can_encode():
 
 def test_setup_opens_the_port_on_every_network_type():
     text = SCRIPT.read_text(encoding="utf-8")
-    assert "-LocalPort $Port -Profile Any" in text
-    assert "Private" not in text
+    assert "-LocalPort $Port -Profile Domain,Private,Public" in text
