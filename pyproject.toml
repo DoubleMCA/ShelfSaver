@@ -8,10 +8,10 @@ version = "0.1.0"
 description = "Watches video library folders and converts worthwhile files to x265 on the GPU."
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = ["fastapi", "uvicorn", "watchdog", "mcp"]
+dependencies = ["fastapi>=0.162,<1", "uvicorn>=0.54,<1", "watchdog>=6.0,<7", "mcp>=2.3,<3"]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest", "httpx", "httpx2"]
 
 [tool.setuptools.packages.find]
 include = ["shelfsaver*"]

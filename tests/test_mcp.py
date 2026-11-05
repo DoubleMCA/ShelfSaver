@@ -103,6 +103,11 @@ def test_both_url_forms_work_without_redirect(live, token):
         assert reply.status_code == 200, (path, reply.status_code)
 
 
+def test_other_paths_under_mcp_are_not_found(live, token):
+    reply = httpx2.post(live + "/mcp/x", json=INIT, headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"})
+    assert reply.status_code == 404
+
+
 def test_lan_host_header_is_accepted(live, token):
     headers = {**MCP_HEADERS, "Authorization": f"Bearer {token}", "Host": "192.168.1.50:8642",
                "Origin": "http://192.168.1.50:8642"}
