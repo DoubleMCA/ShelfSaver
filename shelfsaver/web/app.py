@@ -1,6 +1,7 @@
 """The web API: sign-in, libraries, history, settings and controls. All JSON under /api."""
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import hashlib
 import hmac
@@ -24,6 +25,7 @@ from pydantic import BaseModel, StrictBool
 
 from .. import swap
 from ..db import ensure_mcp_token
+from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +246,18 @@ class _FreshStaticFiles(StaticFiles):
 
 
 def create_app(db, worker, scanner, config) -> FastAPI:
-    app = FastAPI(title="ShelfSaver", docs_url=None, redoc_url=None, openapi_url=None)
+    mcp_server = build_mcp(db, worker, config)
+    mcp_app = mcp_server.streamable_http_app(
+        streamable_http_path="/mcp", stateless_http=True, json_response=True,
+        transport_security=mcp_transport_security())
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        async with mcp_server.session_manager.run():
+            yield
+
+    app = FastAPI(title="ShelfSaver", docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=lifespan)
     limiter = LoginLimiter()
 
     @app.exception_handler(RequestValidationError)
@@ -639,4 +652,6 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         app.add_api_route(route, page_route(file_name), methods=["GET"],
                           include_in_schema=False)
     app.mount("/static", _FreshStaticFiles(directory=STATIC_DIR), name="static")
+    # Added last so it wraps everything: /mcp never reaches the pages or the sign-in routes.
+    app.add_middleware(McpGate, db=db, mcp_app=mcp_app)
     return app

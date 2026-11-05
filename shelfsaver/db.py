@@ -295,6 +295,19 @@ class Database:
         return [_file(r) for r in self._query(
             "SELECT * FROM files WHERE status=? ORDER BY id", (status,))]
 
+    def list_files(self, status: Optional[str] = None, library_id: Optional[int] = None,
+                   limit: int = 100) -> list[FileRow]:
+        where, args = [], []
+        if status is not None:
+            where.append("status=?")
+            args.append(status)
+        if library_id is not None:
+            where.append("library_id=?")
+            args.append(library_id)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        return [_file(r) for r in self._query(
+            f"SELECT * FROM files{clause} ORDER BY id LIMIT ?", [*args, limit])]
+
     def files_in_library(self, library_id: int) -> list[FileRow]:
         return [_file(r) for r in self._query(
             "SELECT * FROM files WHERE library_id=? ORDER BY id", (library_id,))]
