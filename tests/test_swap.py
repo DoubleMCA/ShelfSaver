@@ -1,4 +1,4 @@
-"""Crash-safe replacement and holding folder. Everything stays under tmp_path."""
+"""Crash-safe replacement and holding folder. Every file and folder stays under tmp_path."""
 from __future__ import annotations
 
 import ctypes
@@ -458,6 +458,84 @@ def test_large_file_id_survives_a_json_round_trip(library):
     assert isinstance(loaded.temp_file_id, int)
 
 
+def stop_answering_about_original(patch, plan, delete_error: OSError) -> None:
+    """The volume stops answering about the original at the moment of the delete."""
+    real_remove, real_lstat = os.remove, os.lstat
+    original = ext_path(plan.original)
+    dropped = [False]
+
+    def remove(path, **kwargs):
+        if path == original:
+            dropped[0] = True
+            raise delete_error
+        return real_remove(path, **kwargs)
+
+    def lstat(path, **kwargs):
+        if dropped[0] and path == original:
+            raise OSError(21, "device not ready")
+        return real_lstat(path, **kwargs)
+
+    patch.setattr(swap.os, "remove", remove)
+    patch.setattr(swap.os, "lstat", lstat)
+
+
+def test_failed_delete_with_a_silent_volume_never_reports_success(library, monkeypatch):
+    plan = prepare(library, ".mp4", False)
+    with monkeypatch.context() as patch:
+        stop_answering_about_original(patch, plan, OSError(21, "device not ready"))
+        with pytest.raises(OSError):
+            execute_swap(plan)
+    assert_untouched(plan)  # undone, not treated as the original having vanished
+
+
+def test_not_found_error_with_a_silent_volume_never_reports_success(library, monkeypatch):
+    plan = prepare(library, ".mp4", False)
+    with monkeypatch.context() as patch:
+        stop_answering_about_original(patch, plan, FileNotFoundError(2, "not found"))
+        with pytest.raises(OSError):
+            execute_swap(plan)
+    assert read_file(plan.original) == OLD
+    assert read_file(plan.final) == NEW
+    assert recover_swap(plan) == "finished"
+    assert_finished(plan)
+
+
+def test_not_found_error_with_the_original_still_there_never_reports_success(library, monkeypatch):
+    plan = prepare(library, ".mp4", False)
+
+    def remove(path, **kwargs):
+        raise FileNotFoundError(2, "not found")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(swap.os, "remove", remove)
+        with pytest.raises(FileNotFoundError):
+            execute_swap(plan)
+    assert_untouched(plan)
+
+
+@pytest.mark.parametrize("error", [OSError(21, "device not ready"), PermissionError(5, "denied")])
+def test_disk_that_cannot_be_read_is_not_taken_for_missing_files(library, monkeypatch, error):
+    plan = prepare(library, ".mp4", False)
+    interrupted_after_first_step(plan, monkeypatch)
+    real_lstat = os.lstat
+    original = ext_path(plan.original)
+
+    def lstat(path, **kwargs):
+        if path == original:
+            raise error
+        return real_lstat(path, **kwargs)
+
+    raised = FileInUse if isinstance(error, PermissionError) else OSError
+    with monkeypatch.context() as patch:
+        patch.setattr(swap.os, "lstat", lstat)
+        with pytest.raises(raised):
+            recover_swap(plan)
+        with pytest.raises(raised):
+            execute_swap(plan)
+    assert read_file(plan.original) == OLD
+    assert recover_swap(plan) == "finished"
+
+
 def test_original_vanishing_mid_swap_leaves_the_new_file_in_the_library(library, monkeypatch):
     plan = prepare(library, ".mp4", False)
     monkeypatch.setattr(swap, "_flush_to_disk", lambda path: os.remove(plan.original))
@@ -675,15 +753,31 @@ def test_work_root_is_shelfsaver_at_the_volume_root(library, fake_volume):
     assert work_root(library) == fake_volume / "ShelfSaver"
 
 
-def test_volume_root_lookup_only_reads_the_drive_letter():
-    assert REAL_VOLUME_ROOT("C:\\Some\\Folder\\That\\Need\\Not\\Exist").upper() == "C:\\"
+def test_real_volume_root_lookup_finds_the_volume_of_tmp_path(tmp_path):
+    root = REAL_VOLUME_ROOT(tmp_path / "need" / "not" / "exist")
+    assert os.path.ismount(root)
+    assert os.path.normcase(str(tmp_path)).startswith(os.path.normcase(root))
+    assert not (tmp_path / "need").exists()
 
 
-def test_volume_root_of_a_missing_drive_stays_on_that_drive():
-    letters = [c for c in "ZYXWVUTSRQPONMLKJIHGFED" if not os.path.exists(f"{c}:\\")]
-    if not letters:
-        pytest.skip("every drive letter is in use")
-    assert REAL_VOLUME_ROOT(f"{letters[0]}:\\Movies").upper() == f"{letters[0]}:\\"
+@pytest.mark.parametrize(
+    "api_found,api_answer",
+    [
+        pytest.param(0, "Q:\\leftover\\", id="lookup-fails"),
+        pytest.param(1, "C:\\", id="answers-other-drive"),
+    ],
+)
+def test_volume_root_of_a_missing_drive_stays_on_that_drive(monkeypatch, api_found, api_answer):
+    def get_volume_path_name(path, buffer, length):
+        buffer.value = api_answer
+        return api_found
+
+    monkeypatch.setattr(
+        swap.ctypes,
+        "WinDLL",
+        lambda *args, **kwargs: SimpleNamespace(GetVolumePathNameW=get_volume_path_name),
+    )
+    assert REAL_VOLUME_ROOT("Q:\\Movies") == "Q:\\"
 
 
 def test_offline_library_counts_and_clears_nothing(tmp_path, monkeypatch):
@@ -701,10 +795,21 @@ def test_is_volume_root(library, fake_volume):
     assert not is_volume_root(library)
 
 
-def test_is_volume_root_with_the_real_lookup(monkeypatch):
+def test_is_volume_root_with_the_real_lookup(tmp_path, monkeypatch):
     monkeypatch.setattr(swap, "_volume_root", REAL_VOLUME_ROOT)
-    assert is_volume_root("C:\\")
-    assert not is_volume_root("C:\\Some\\Folder\\That\\Need\\Not\\Exist")
+    assert is_volume_root(REAL_VOLUME_ROOT(tmp_path))
+    assert not is_volume_root(tmp_path)
+
+
+@pytest.mark.parametrize("bare_drive", ["H:", "h:", "Q:"])
+def test_bare_drive_is_a_volume_root(bare_drive):
+    assert is_volume_root(bare_drive)
+
+
+def test_bare_drive_library_is_refused(tmp_path):
+    bare_drive = os.path.splitdrive(str(tmp_path))[0]
+    with pytest.raises(ValueError):
+        make_plan(str(tmp_path / "Movie.mkv"), str(tmp_path / "t.mkv"), ".mkv", bare_drive, "M", True)
 
 
 @pytest.mark.parametrize("holding", [False, True])

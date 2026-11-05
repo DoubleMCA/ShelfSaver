@@ -105,6 +105,10 @@ def work_root(library_path) -> Path:
 
 def is_volume_root(library_path) -> bool:
     """True when the library is a whole volume, which would put `ShelfSaver\\` inside it."""
+    drive, rest = os.path.splitdrive(os.fspath(library_path))
+    if drive and not rest:  # "H:" would otherwise resolve to the current folder on that drive
+        return True
+
     def comparable(path) -> str:
         return os.path.normcase(os.path.abspath(path)).rstrip("\\")
 
@@ -127,7 +131,16 @@ def _safe_folder_name(library_name: str) -> str:
 
 
 def _present(path: str) -> bool:
-    return os.path.lexists(ext_path(path))
+    """True if something is at `path`. Raises `OSError` if the disk cannot say.
+
+    `os.path.lexists` answers False on any error, which would read a volume that stopped
+    responding as files having vanished.
+    """
+    try:
+        os.lstat(ext_path(path))
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _free_holding_path(wanted: str) -> str:
@@ -296,32 +309,40 @@ def execute_swap(plan: SwapPlan) -> None:
     """Carry out the plan, or resume one a crash or earlier failure interrupted.
 
     After `FileInUse` the plan can simply be run again. It raises `TargetExists` if a move
-    would land on a different file, and `UnexpectedSwapState` if the disk matches no step.
+    would land on a different file, `UnexpectedSwapState` if the disk matches no step, and
+    `OSError` for any other failure. Returning normally always means the swap is finished.
     """
-    state = _swap_state(plan)
-    if state == _FINISHED:
-        return
-    if state == _UNEXPECTED:
-        if _target_taken(plan):
-            raise TargetExists(f"A different file is in the way of the swap for {plan.original}")
-        raise UnexpectedSwapState(f"Files on disk match no swap step for {plan.original}")
-    if state == _NOT_STARTED and not _is_new_file(plan.temp, plan):
-        raise UnexpectedSwapState(f"The new file for {plan.original} is not the planned file")
-
     with _swap_errors():
+        state = _swap_state(plan)
+        if state == _FINISHED:
+            return
+        if state == _UNEXPECTED:
+            if _target_taken(plan):
+                raise TargetExists(
+                    f"A different file is in the way of the swap for {plan.original}"
+                )
+            raise UnexpectedSwapState(f"Files on disk match no swap step for {plan.original}")
+        if state == _NOT_STARTED and not _is_new_file(plan.temp, plan):
+            raise UnexpectedSwapState(f"The new file for {plan.original} is not the planned file")
+
         if state == _NOT_STARTED:
             _flush_to_disk(plan.temp)
             _first_step(plan)
         try:
             _last_step(plan)
-        except OSError as exc:
-            if not _keeps_name(plan) and not _present(plan.original):
-                # The original vanished. Never pull the only new copy back out of the library.
-                if plan.holding:
+        except FileNotFoundError as exc:
+            if not _keeps_name(plan):
+                # If the original vanished, never pull the only new copy back out of the library.
+                state = _swap_state(plan)
+                if state == _FINISHED:
+                    return
+                if state == _UNEXPECTED:
                     raise UnexpectedSwapState(
                         f"{plan.original} vanished before it could be held"
                     ) from exc
-                return
+            _undo_first_step(plan)
+            raise
+        except OSError:
             _undo_first_step(plan)
             raise
 
@@ -336,18 +357,18 @@ def recover_swap(plan: SwapPlan) -> Literal["finished", "not_started", "unexpect
     Raises, leaving the plan safe to recover again later:
     - `FileInUse` if the remaining step is blocked by another program.
     - `TargetExists` if a file appeared where the remaining step would move one.
-    - `OSError` for any other failure of that step.
+    - `OSError` for any other failure, including a disk that cannot be read to judge the state.
     """
-    state = _swap_state(plan)
-    if state == _MIDWAY:
-        try:
-            with _swap_errors():
+    with _swap_errors():
+        state = _swap_state(plan)
+        if state == _MIDWAY:
+            try:
                 _last_step(plan)
-            return _FINISHED
-        except FileNotFoundError:
-            state = _swap_state(plan)  # something vanished since the check, so judge again
-            if state == _MIDWAY:
-                raise
+                return _FINISHED
+            except FileNotFoundError:
+                state = _swap_state(plan)  # something vanished since the check, so judge again
+                if state == _MIDWAY:
+                    raise
     if state == _UNEXPECTED:
         logger.warning("Files on disk match no swap step for %s; left as is", plan.original)
     return state
