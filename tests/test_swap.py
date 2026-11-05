@@ -982,3 +982,34 @@ def test_clear_holding_skips_a_file_it_cannot_delete_and_counts_only_what_it_fre
         assert clear_holding([str(library)]) == 5
     assert stuck.read_bytes() == b"123"
     assert held_size([str(library)]) == 3
+
+
+def test_an_unreadable_held_entry_does_not_stop_the_rest(tmp_path, monkeypatch):
+    holding = tmp_path / "holding"
+    holding.mkdir()
+    (holding / "good.bin").write_bytes(b"12345")
+    (holding / "bad.bin").write_bytes(b"x")
+    real_scandir = os.scandir
+
+    class Broken:
+        def __init__(self, entry):
+            self._entry, self.name, self.path = entry, entry.name, entry.path
+
+        def stat(self, follow_symlinks=True):
+            if self.name == "bad.bin":
+                raise PermissionError("denied")
+            return self._entry.stat(follow_symlinks=follow_symlinks)
+
+    class Listing:
+        def __init__(self, path):
+            self._inner = real_scandir(path)
+
+        def __enter__(self):
+            return [Broken(e) for e in self._inner.__enter__()]
+
+        def __exit__(self, *args):
+            return self._inner.__exit__(*args)
+
+    monkeypatch.setattr(swap.os, "scandir", Listing)
+    items = list(swap._held_items(holding))
+    assert [(os.path.basename(p), size) for p, _, size in items] == [("good.bin", 5)]

@@ -412,7 +412,11 @@ def _held_items(folder) -> Iterator[tuple[str, str, int]]:
         logger.warning("Could not read %s: %s", folder, exc)
         return
     for entry in found:
-        info = entry.stat(follow_symlinks=False)
+        try:
+            info = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            logger.warning("Could not read %s: %s", entry.path, exc)
+            continue
         if stat.S_ISREG(info.st_mode):
             # Includes files with other reparse tags, such as deduplicated ones. Deleting one
             # only ever removes that file.

@@ -29,6 +29,7 @@ from .probe import UNREADABLE, ProbeError, file_details, probe
 from .swap import (
     FileInUse,
     SwapPlan,
+    clear_holding,
     TargetExists,
     UnexpectedSwapState,
     _may_be_a_link,
@@ -247,6 +248,7 @@ class Worker:
         self._swap_retry_asked: set[int] = set()  # run ids the owner asked to try now
         self._parked: Optional[_Job] = None  # converted and verified, waiting for library room
         self._failed_encodes: list[int] = []  # file ids of the current failures in a row
+        self._holding_lock = threading.Lock()  # held while holding is cleared or a swap begins
         self._advancing: Optional[int] = None  # id of the run whose swap is being advanced
 
     # ---- Controls and status, safe to call from any thread ----
@@ -285,19 +287,25 @@ class Worker:
                 self._next_locked_try.pop(file_id, None)
             self.db.requeue([file_id])
 
-    def resolve_swap(self, file_id: int) -> str:
+    def resolve_swap(self, file_id: int) -> tuple[str, Optional[str]]:
         """End a kept swap at the owner's request, without touching any file.
 
-        Returns "resolved", "none" (the file has no kept swap) or "busy" (the swap is being
-        tried right now).
+        Returns (outcome, held_path). The outcome is "resolved", "none" (the file has no kept
+        swap), "busy" (the swap is being tried right now) or "held" (the original is gone and
+        a held file may be the only copy, so the swap must be sorted out first;
+        held_path names it when it is known).
         """
         file = self.db.get_file(file_id)
         runs = [r for r in self.db.active_runs(("swapping",)) if r.file_id == file_id]
         if file is None or file.status != "failed" or not runs:
-            return "none"
+            return "none", None
+        for run in runs:
+            blocker = self._only_copy_may_be_held(run, file)
+            if blocker is not None:
+                return "held", blocker or None
         with self._lock:
             if self._advancing in {r.id for r in runs}:
-                return "busy"
+                return "busy", None
             for run in runs:
                 self._next_swap_try.pop(run.id, None)
                 self._swap_retry_asked.discard(run.id)
@@ -305,7 +313,44 @@ class Worker:
             self._end_run(run.id, "failed", RESOLVED_NOTE)
         self.db.set_file_status(file_id, "failed", RESOLVED_NOTE)
         logger.info("The owner marked the kept swap for file %s as handled", file_id)
-        return "resolved"
+        return "resolved", None
+
+    def _only_copy_may_be_held(self, run: Run, file: FileRow) -> Optional[str]:
+        """The held path (or "" when unknown) if the original is gone while its copy may be in
+        the holding folder, otherwise None."""
+        try:
+            plan = _load_swap(run.swap_json)[0]
+        except (ValueError, TypeError, KeyError):
+            plan = None
+        original = plan.original if plan else file.path
+        try:
+            if _present(original):
+                return None
+            if plan is None:
+                return ""
+            return plan.holding if plan.holding and _present(plan.holding) else None
+        except OSError:
+            return plan.holding if plan and plan.holding else ""
+
+    def clear_holding_when_idle(self, paths, states) -> Optional[int]:
+        """Empty the holding folders unless a file is being replaced. Returns the bytes freed,
+        or None when a run is in the way.
+
+        Nothing can start replacing a file while this runs, because that step takes the same
+        lock. A finished conversion parked for room on the library drive is not in the way:
+        emptying the holding folder is how to make room.
+        """
+        with self._holding_lock:
+            volumes = {os.path.normcase(str(work_root(p))) for p in paths}
+            parked = self._parked.run.id if self._parked is not None else None
+            for run in self.db.active_runs(states):
+                if run.id == parked:
+                    continue
+                library_id = (self.db.run_record(run.id) or {}).get("library_id")
+                library = next((l for l in self.db.list_libraries() if l.id == library_id), None)
+                if library is None or os.path.normcase(str(work_root(library.path))) in volumes:
+                    return None
+            return clear_holding(paths)
 
     # ---- Status helpers ----
 
@@ -722,8 +767,9 @@ class Worker:
             raise _RunFailed("Couldn't plan how to replace this file") from exc
 
         # Written before anything moves, so a crash at any later point can be picked up.
-        self.db.update_run(job.run.id, state="swapping", now_path=plan.final,
-                           swap_json=_dump_swap(plan, job.size, job.mtime))
+        with self._holding_lock:
+            self.db.update_run(job.run.id, state="swapping", now_path=plan.final,
+                               swap_json=_dump_swap(plan, job.size, job.mtime))
         job.swap_saved = True
         self._advance_swap(next(r for r in self.db.active_runs(("swapping",))
                                 if r.id == job.run.id))

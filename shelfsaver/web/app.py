@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import string
 import tempfile
@@ -40,7 +41,11 @@ NOT_LOCAL = "Choose a folder on a drive in this PC. Network folders aren't suppo
 STILL_FINISHING = ("A file in this library is still being finished. "
                    "Try again when it's done.")
 HOLDING_BUSY = ("A file is being replaced right now, and a held file can be the only copy "
-                "at this moment. Try again when nothing is being converted.")
+                "at this moment. Pause conversions, wait for the current file to finish, "
+                "then try again.")
+IN_WORK_FOLDER = ("That folder is inside the ShelfSaver folder that holds files being replaced. "
+                  "Choose a different folder.")
+SAFE_HOST = re.compile(r"[A-Za-z0-9.\-]{1,253}(:[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\](:[0-9]{1,5})?")
 
 
 # ---- passwords and sessions
@@ -171,6 +176,8 @@ def _check_local_folder(raw: str, what: str) -> str:
     if not is_folder:
         raise _fail(400, f"That {what} folder can't be found. Check the path and that the "
                          "drive is connected.")
+    if swap._is_inside(os.path.abspath(path), swap.work_root(path)):
+        raise _fail(400, IN_WORK_FOLDER)
     return path
 
 
@@ -365,6 +372,21 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         if not 1 <= limit <= MAX_PAGE or offset < 0:
             raise _fail(400, f"Ask for between 1 and {MAX_PAGE} rows at a time.")
         names = {l.id: l.name for l in db.list_libraries()}
+
+        def was_interrupted(run, file):
+            # A restart ended this run; if the file has since failed, that was a later run.
+            return run["state"] == "interrupted" and (file is None or file.status == "failed")
+
+        def status_of(run, file):
+            if was_interrupted(run, file):
+                return "interrupted"
+            return file.status if file else run["state"]
+
+        def reason_of(run, file):
+            if was_interrupted(run, file):
+                return run["error"]
+            return file.reason if file else None
+
         rows = []
         for run in db.history(library_id, limit, offset):
             file = db.get_file(run["file_id"])
@@ -379,8 +401,8 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                 "state": run["state"],
                 # The file's own status and reason say what is true now; a run that was only
                 # interrupted or paused is not a failure.
-                "status": file.status if file else run["state"],
-                "reason": file.reason if file else None,
+                "status": status_of(run, file),
+                "reason": reason_of(run, file),
                 "was": {"size": run["was_size"], "format": run["was_format"],
                         "bitrate": run["was_bitrate"]},
                 "now": {"size": run["now_size"], "format": run["now_format"],
@@ -424,7 +446,12 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                              "files.")
         if db.get_file(file_id) is None:
             raise _fail(404, "That file isn't in the list any more.")
-        outcome = worker.resolve_swap(file_id)
+        outcome, held = worker.resolve_swap(file_id)
+        if outcome == "held":
+            where = f" It is at {held}." if held else ""
+            raise _fail(400, "The original file isn't in its place, and its copy may be in "
+                             f"the holding folder.{where} Put the file back or check the "
+                             "ShelfSaver folder on this drive first. Nothing was changed.")
         if outcome == "busy":
             raise _fail(409, "ShelfSaver is working on this file right now. "
                              "Try again in a moment.")
@@ -531,7 +558,9 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     def get_settings(request: Request):
         info = held_info()
         token = ensure_mcp_token(db)
-        host = request.headers.get("host") or f"localhost:{config.port}"
+        host = request.headers.get("host") or ""
+        if not SAFE_HOST.fullmatch(host):
+            host = f"YOUR-PC:{config.port}"
         command = (f'claude mcp add --transport http shelfsaver http://{host}/mcp '
                    f'--header "Authorization: Bearer {token}"')
         return {
@@ -570,10 +599,10 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     def clear_holding(body: Optional[ConfirmBody] = None):
         if body is None or body.confirm is not True:
             raise _fail(400, "Please confirm that you want to empty the holding folder.")
-        if db.active_runs(ACTIVE_RUN_STATES):
-            raise _fail(400, HOLDING_BUSY)
         libraries = db.list_libraries()
-        freed = swap.clear_holding([l.path for l in libraries])
+        freed = worker.clear_holding_when_idle([l.path for l in libraries], ACTIVE_RUN_STATES)
+        if freed is None:
+            raise _fail(400, HOLDING_BUSY)
         return {"freed_bytes": freed,
                 "libraries": [l.name for l in libraries],
                 "drives": _drive_list(libraries),

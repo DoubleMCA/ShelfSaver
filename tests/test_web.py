@@ -1,23 +1,29 @@
 """The web API. Fake worker and scanner for route tests, real ones for one integration test."""
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from shelfsaver import swap
+from shelfsaver import swap, worker as worker_module
+from shelfsaver.__main__ import acquire_instance_lock
 from shelfsaver.config import Config
 from shelfsaver.db import Database, ensure_mcp_token
 from shelfsaver.scanner import Scanner
 from shelfsaver.web.app import SESSION_COOKIE, create_app
-from shelfsaver.worker import Worker
+from shelfsaver.worker import Worker, _dump_swap
 from tests.helpers import make_video
 
+REAL_VOLUME_ROOT = swap._volume_root
 PASSWORD = "correct horse battery"
 
 
@@ -25,7 +31,9 @@ class FakeWorker:
     def __init__(self):
         self.calls = []
         self.paused = False
-        self.resolve_result = "resolved"
+        self._holding_lock = threading.Lock()
+        self._parked = None
+        self.resolve_result = ("resolved", None)
 
     def status(self):
         if self.paused:
@@ -48,6 +56,8 @@ class FakeWorker:
     def resolve_swap(self, file_id):
         self.calls.append(("resolve", file_id))
         return self.resolve_result
+
+    clear_holding_when_idle = Worker.clear_holding_when_idle
 
 
 class FakeScanner:
@@ -76,7 +86,17 @@ class FakeScanner:
 @pytest.fixture
 def parts(tmp_path):
     db = Database(tmp_path / "data" / "shelfsaver.db")
-    return db, FakeWorker(), FakeScanner(), Config(data_dir=tmp_path / "data")
+    worker = FakeWorker()
+    worker.db = db
+    return db, worker, FakeScanner(), Config(data_dir=tmp_path / "data")
+
+
+@pytest.fixture(autouse=True)
+def fake_volume(tmp_path, monkeypatch):
+    """Keep every ShelfSaver work folder under tmp_path, never on the real drive."""
+    volume = tmp_path / "volume"
+    monkeypatch.setattr(swap, "_volume_root", lambda path: str(volume) + os.sep)
+    return volume
 
 
 @pytest.fixture
@@ -206,7 +226,8 @@ def test_add_library_rejects_with_plain_message(authed, bad):
     assert len(r.json()["detail"]) > 10
 
 
-def test_add_library_rejects_a_whole_drive(authed, tmp_path):
+def test_add_library_rejects_a_whole_drive(authed, tmp_path, monkeypatch):
+    monkeypatch.setattr(swap, "_volume_root", REAL_VOLUME_ROOT)  # a read-only lookup
     root = os.path.splitdrive(str(tmp_path))[0] + "\\"
     r = authed.post("/api/libraries", json={"name": "All", "path": root, "level": "low"})
     assert r.status_code == 400
@@ -456,10 +477,13 @@ def test_resolve_needs_confirm_and_a_kept_swap(authed, parts, tmp_path):
     assert worker.calls == []
     assert authed.post(f"/api/files/{f.id}/resolve", json={"confirm": True}).status_code == 200
     assert worker.calls == [("resolve", f.id)]
-    worker.resolve_result = "none"
+    worker.resolve_result = ("none", None)
     r = authed.post(f"/api/files/{f.id}/resolve", json={"confirm": True})
     assert r.status_code == 400 and r.json()["detail"]
-    worker.resolve_result = "busy"
+    worker.resolve_result = ("held", "X:\\held\\old.mkv")
+    r = authed.post(f"/api/files/{f.id}/resolve", json={"confirm": True})
+    assert r.status_code == 400 and "X:\\held\\old.mkv" in r.json()["detail"]
+    worker.resolve_result = ("busy", None)
     assert authed.post(f"/api/files/{f.id}/resolve", json={"confirm": True}).status_code == 409
     assert authed.post("/api/files/9999/resolve", json={"confirm": True}).status_code == 404
 
@@ -619,12 +643,225 @@ def test_resolve_swap_ends_a_kept_swap_without_touching_files(tmp_path):
     f = db.upsert_file(lib.id, str(original), 4, 1.0, "failed", "Couldn't finish")
     run = db.start_run(f.id, 4, "H.264", None, "why")
     db.update_run(run.id, state="swapping", swap_json="{}")
-    assert worker.resolve_swap(f.id) == "resolved"
+    assert worker.resolve_swap(f.id) == ("resolved", None)
     assert db.active_runs(("swapping", "waiting_in_use", "running")) == []
     after = db.get_file(f.id)
     assert after.status == "failed" and "Nothing was deleted" in after.reason
     assert original.read_bytes() == b"orig"
-    assert worker.resolve_swap(f.id) == "none"
+    assert worker.resolve_swap(f.id) == ("none", None)
     # A file that is not stuck is refused too.
     g = db.upsert_file(lib.id, str(tmp_path / "movies" / "b.mkv"), 1, 1.0, "queued")
-    assert worker.resolve_swap(g.id) == "none"
+    assert worker.resolve_swap(g.id) == ("none", None)
+
+
+# ---- fix round 1
+
+def kept_swap(tmp_path, original_exists, held_exists, plan_ok=True):
+    """A kept swap whose original is (or is not) in place and whose copy is (or is not) held."""
+    db = Database(tmp_path / "data" / "shelfsaver.db")
+    worker = Worker(db, Config(data_dir=tmp_path / "data"))
+    folder = make_folder(tmp_path, "movies")
+    original = folder / "a.mkv"
+    held = tmp_path / "volume" / "ShelfSaver" / "holding" / "M" / "a.mkv"
+    held.parent.mkdir(parents=True)
+    if original_exists:
+        original.write_bytes(b"orig")
+    if held_exists:
+        held.write_bytes(b"only copy")
+    lib = db.add_library("M", str(folder), "low", True)
+    f = db.upsert_file(lib.id, str(original), 4, 1.0, "failed", "Couldn't finish")
+    run = db.start_run(f.id, 4, "H.264", None, "why")
+    plan = swap.SwapPlan(str(original), str(tmp_path / "volume" / "ShelfSaver" / "incoming"
+                                           / "1-1.mkv"), str(original), str(held), 3, 1)
+    db.update_run(run.id, state="swapping",
+                  swap_json=_dump_swap(plan, 4, 1.0) if plan_ok else "garbage")
+    return db, worker, f, run, original, held
+
+
+def test_resolve_refused_when_the_only_copy_is_held(tmp_path):
+    db, worker, f, run, original, held = kept_swap(tmp_path, False, True)
+    outcome, where = worker.resolve_swap(f.id)
+    assert outcome == "held" and where == str(held)
+    assert db.get_file(f.id).reason == "Couldn't finish"
+    assert db.active_runs(("swapping",))  # unchanged
+    assert held.read_bytes() == b"only copy"
+
+
+def test_resolve_refused_with_an_unreadable_plan_while_the_original_is_missing(tmp_path):
+    db, worker, f, run, original, held = kept_swap(tmp_path, False, True, plan_ok=False)
+    assert worker.resolve_swap(f.id) == ("held", None)
+    original.write_bytes(b"back")
+    assert worker.resolve_swap(f.id) == ("resolved", None)
+
+
+def test_resolve_allowed_when_the_original_is_in_place(tmp_path):
+    db, worker, f, run, original, held = kept_swap(tmp_path, True, True)
+    assert worker.resolve_swap(f.id) == ("resolved", None)
+    assert held.exists() and original.exists()
+
+
+def test_resolve_then_clear_cannot_delete_the_only_copy(authed, parts, tmp_path):
+    db, _, scanner, config = parts
+    folder = make_folder(tmp_path, "movies")
+    lib = add_library(authed, folder).json()
+    scanner.wait()
+    held = tmp_path / "volume" / "ShelfSaver" / "holding" / "M" / "a.mkv"
+    held.parent.mkdir(parents=True)
+    held.write_bytes(b"only copy")
+    row = db.upsert_file(lib["id"], str(folder / "a.mkv"), 4, 1.0, "failed", "Kept")
+    run = db.start_run(row.id, 4, "H.264", None, "why")
+    plan = swap.SwapPlan(str(folder / "a.mkv"), str(tmp_path / "t.mkv"), str(folder / "a.mkv"),
+                         str(held), 3, 1)
+    db.update_run(run.id, state="swapping", swap_json=_dump_swap(plan, 4, 1.0))
+    with TestClient(create_app(db, Worker(db, config), scanner, config)) as c:
+        c.cookies.update(authed.cookies)
+        assert c.post(f"/api/files/{row.id}/resolve", json={"confirm": True}).status_code == 400
+        assert c.post("/api/holding/clear", json={"confirm": True}).status_code == 400
+    assert held.read_bytes() == b"only copy"
+
+
+def real_worker_with_library(authed, parts, tmp_path):
+    db, _, scanner, config = parts
+    folder = make_folder(tmp_path, "movies")
+    lib = add_library(authed, folder).json()
+    scanner.wait()
+    return db, Worker(db, config), folder, lib
+
+
+def test_clear_blocks_the_start_of_a_swap_until_it_is_done(parts, tmp_path, monkeypatch):
+    db, _, scanner, config = parts
+    worker = Worker(db, config)
+    folder = make_folder(tmp_path, "movies")
+    db.add_library("M", str(folder), "low", True)
+    release, inside = threading.Event(), threading.Event()
+
+    def slow_clear(paths):
+        inside.set()
+        assert release.wait(5)
+        return 7
+
+    monkeypatch.setattr(worker_module, "clear_holding", slow_clear)
+    result = []
+    clearer = threading.Thread(target=lambda: result.append(
+        worker.clear_holding_when_idle([str(folder)], ("running", "swapping"))))
+    clearer.start()
+    assert inside.wait(5)
+    started = threading.Event()
+
+    def begin_swap():
+        with worker._holding_lock:
+            started.set()
+
+    starter = threading.Thread(target=begin_swap)
+    starter.start()
+    assert not started.wait(0.3)  # the swap's transition waits for the clear
+    release.set()
+    clearer.join(5)
+    starter.join(5)
+    assert started.is_set() and result == [7]
+
+
+def test_swap_transition_takes_the_holding_lock():
+    lines = [ln.strip() for ln in inspect.getsource(Worker._place_new_file).splitlines()]
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("self.db.update_run(job.run.id,"))
+    assert 'state="swapping"' in lines[at] and lines[at - 1] == "with self._holding_lock:"
+
+
+def test_clear_refused_for_a_running_run_but_not_a_parked_one(authed, parts, tmp_path):
+    db, worker, folder, lib = real_worker_with_library(authed, parts, tmp_path)
+    held = hold_a_file(folder)
+    f = db.upsert_file(lib["id"], str(folder / "a.mkv"), 1, 1.0, "working")
+    run = db.start_run(f.id, 1, "H.264", None, "why")
+    paths = [str(folder)]
+    assert worker.clear_holding_when_idle(paths, ("running", "swapping")) is None
+    assert held.exists()
+    worker._parked = SimpleNamespace(run=run)
+    assert worker.clear_holding_when_idle(paths, ("running", "swapping")) == 2048
+    assert not held.exists()
+
+
+def test_clear_ignores_runs_on_other_volumes(parts, tmp_path, monkeypatch):
+    db, _, scanner, config = parts
+    worker = Worker(db, config)
+    a, b = make_folder(tmp_path, "vol_a/movies"), make_folder(tmp_path, "vol_b/movies")
+    monkeypatch.setattr(swap, "_volume_root",
+                        lambda path: str(tmp_path / ("vol_a" if "vol_a" in str(path)
+                                                     else "vol_b")) + os.sep)
+    db.add_library("A", str(a), "low", True)
+    lb = db.add_library("B", str(b), "low", True)
+    f = db.upsert_file(lb.id, str(b / "x.mkv"), 1, 1.0, "working")
+    db.start_run(f.id, 1, "H.264", None, "why")
+    assert worker.clear_holding_when_idle([str(a)], ("running",)) == 0
+    assert worker.clear_holding_when_idle([str(b)], ("running",)) is None
+
+
+def test_busy_message_suggests_pausing(authed, parts, tmp_path):
+    db, *_ = parts
+    lib = add_library(authed, make_folder(tmp_path, "movies")).json()
+    f = db.upsert_file(lib["id"], str(tmp_path / "movies" / "a.mkv"), 1, 1.0, "working")
+    db.start_run(f.id, 1, "H.264", None, "why")
+    r = authed.post("/api/holding/clear", json={"confirm": True})
+    assert r.status_code == 400 and "Pause" in r.json()["detail"]
+
+
+def test_library_and_scratch_cannot_be_inside_the_work_folder(authed, tmp_path):
+    holding = tmp_path / "volume" / "ShelfSaver" / "holding" / "M"
+    holding.mkdir(parents=True)
+    for target in (tmp_path / "volume" / "ShelfSaver", holding):
+        r = add_library(authed, target)
+        assert r.status_code == 400 and "ShelfSaver folder" in r.json()["detail"]
+        r = authed.patch("/api/settings", json={"scratch_dir": str(target)})
+        assert r.status_code == 400 and "ShelfSaver folder" in r.json()["detail"]
+    sibling = make_folder(tmp_path, "volume/ShelfSaver2")
+    assert add_library(authed, sibling).status_code == 200
+
+
+def test_interrupted_run_never_shows_as_failed(authed, parts, tmp_path):
+    db, *_ = parts
+    lib, f, run = seed_run(db, tmp_path, state="interrupted", file_status="failed",
+                           reason="The conversion failed")
+    db.update_run(run.id, error="Interrupted by a restart, so it will start again")
+    row = authed.get("/api/history").json()[0]
+    assert row["state"] == "interrupted" and row["status"] == "interrupted"
+    assert row["reason"] == "Interrupted by a restart, so it will start again"
+
+
+def test_mcp_command_ignores_an_unsafe_host_header(authed):
+    body = authed.get("/api/settings", headers={"host": 'x" ; rm -rf /'}).json()
+    assert "rm -rf" not in body["mcp_command"] and "YOUR-PC:8642" in body["mcp_command"]
+    ok = authed.get("/api/settings", headers={"host": "my-pc.local:9000"}).json()
+    assert "http://my-pc.local:9000/mcp" in ok["mcp_command"]
+
+
+# ---- one copy of the app at a time
+
+def test_second_instance_is_refused_and_a_dead_one_does_not_block(tmp_path):
+    data = tmp_path / "lockdata"
+    first = acquire_instance_lock(data)
+    assert first is not None
+    assert acquire_instance_lock(data) is None
+    first.close()
+    again = acquire_instance_lock(data)
+    assert again is not None
+    again.close()
+    # A process that dies while holding the lock must not block the next start.
+    code = ("import sys, pathlib, time\n"
+            "from shelfsaver.__main__ import acquire_instance_lock\n"
+            "h = acquire_instance_lock(pathlib.Path(sys.argv[1]))\n"
+            "print('locked' if h else 'refused', flush=True)\ntime.sleep(60)\n")
+    child = subprocess.Popen([sys.executable, "-c", code, str(data)], stdout=subprocess.PIPE,
+                             text=True, cwd=Path(__file__).resolve().parent.parent)
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        assert acquire_instance_lock(data) is None
+    finally:
+        child.kill()
+        child.wait()
+    after = None
+    for _ in range(50):  # Windows lets go of a dead process's locks a moment after it exits
+        after = acquire_instance_lock(data)
+        if after is not None:
+            break
+        time.sleep(0.1)
+    assert after is not None
+    after.close()
