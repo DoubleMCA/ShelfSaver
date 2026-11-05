@@ -23,7 +23,7 @@ from typing import Callable, Optional
 
 from .decide import decide
 from .encode import EncodeResult, build_command, output_extension, run_ffmpeg
-from .models import Decision, FileRow, Library, MediaInfo, Run
+from .models import RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import ProbeError, probe
 from .swap import (
     FileInUse,
@@ -31,6 +31,7 @@ from .swap import (
     TargetExists,
     UnexpectedSwapState,
     _may_be_a_link,
+    _target_taken as target_is_taken,
     execute_swap,
     ext_path,
     is_volume_root,
@@ -65,7 +66,10 @@ CONVERT_FAILED = "The conversion failed"
 SOMETHING_WRONG = "Something went wrong with this file"
 SWAP_KEPT = ("Couldn't finish replacing this file. Nothing was deleted. "
              "Retry it, or it will be tried again at the next start.")
+SWAP_RECORD_LOST = ("Couldn't finish replacing this file, because the record of it was lost. "
+                    "Nothing was deleted. Its files are in the ShelfSaver folder on this drive.")
 TARGET_TAKEN = "A different file is already where the new file needs to go"
+LOCKED_NOTE = "The file is in use, so it will be tried again"
 STOPPED_NOTE = "Stopped before finishing, so it will start again"
 INTERRUPTED_NOTE = "Interrupted by a restart, so it will start again"
 CHANGED_NOTE = "The original changed during the conversion, so it will start again"
@@ -121,13 +125,39 @@ class _Stopped(Exception):
     """A pause or shutdown interrupted a copy."""
 
 
+class _SourceLocked(Exception):
+    """Another program won't let the file being copied be read. Not an `OSError`, so it can't
+    be mistaken for trouble with the destination."""
+
+
+def _is_locked(path) -> bool:
+    """True if another program won't let this file be opened for reading right now."""
+    try:
+        with open(ext_path(path), "rb"):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def _copy_file(source, target, on_fraction: Callable[[float], None],
                should_stop: Callable[[], bool]) -> None:
     """Copy contents only, so a read-only flag can't follow the file, and commit them to disk."""
-    total = os.stat(ext_path(source)).st_size
+    try:
+        reader = open(ext_path(source), "rb")
+    except PermissionError as exc:
+        raise _SourceLocked(str(exc)) from exc
     done = 0
-    with open(ext_path(source), "rb") as reader, open(ext_path(target), "wb") as writer:
-        while chunk := reader.read(COPY_CHUNK_BYTES):
+    with reader, open(ext_path(target), "wb") as writer:
+        total = os.fstat(reader.fileno()).st_size
+        while True:
+            try:
+                chunk = reader.read(COPY_CHUNK_BYTES)
+            except PermissionError as exc:
+                raise _SourceLocked(str(exc)) from exc
+            if not chunk:
+                break
             if should_stop():
                 raise _Stopped()
             writer.write(chunk)
@@ -204,6 +234,7 @@ class Worker:
         self._pause_message: Optional[str] = None
         self._stop: Optional[threading.Event] = None
         self._next_swap_try: dict[int, float] = {}  # run id -> when a waiting run is next due
+        self._next_locked_try: dict[int, float] = {}  # file id -> when a locked file is next due
         self._swap_retry_asked: set[int] = set()  # run ids the owner asked to try now
         self._parked: Optional[_Job] = None  # converted and verified, waiting for library room
         self._failed_encodes: list[int] = []  # file ids of the current failures in a row
@@ -239,7 +270,9 @@ class Worker:
                 self._swap_retry_asked.update(held)
             return
         file = self.db.get_file(file_id)
-        if file is not None and file.status == "failed":
+        if file is not None and file.status in ("failed", "waiting_in_use"):
+            with self._lock:
+                self._next_locked_try.pop(file_id, None)
             self.db.requeue([file_id])
 
     # ---- Status helpers ----
@@ -297,6 +330,7 @@ class Worker:
         if self._paused.is_set():
             return False
         worked = self._advance_due_swaps()
+        self._requeue_due_locked_files()
         if self._parked is not None:
             return self._guarded(self._parked, self._place_new_file) or worked
 
@@ -343,7 +377,28 @@ class Worker:
             if pending[0].state == "waiting_in_use":
                 self.db.set_file_status(file.id, "waiting_in_use", WAITING_IN_USE)
             else:
-                self.db.set_file_status(file.id, "failed", SWAP_KEPT)
+                self.db.set_file_status(file.id, "failed", pending[0].error or SWAP_KEPT)
+
+    def _requeue_due_locked_files(self) -> None:
+        """Files that were locked before a run could start go back in the queue when due."""
+        now = _now()
+        with_swap = {r.file_id for r in self.db.active_runs(SWAP_STATES)}
+        for file in self.db.files_with_status("waiting_in_use"):
+            if file.id in with_swap:
+                continue
+            with self._lock:
+                due = now >= self._next_locked_try.get(file.id, now)
+                if due:
+                    self._next_locked_try.pop(file.id, None)
+            if due:
+                self.db.requeue([file.id])
+
+    def _wait_for_lock(self, file_id: int, path: str) -> None:
+        """Waiting rather than requeued, or the same large file would be picked again at once."""
+        logger.info("In use, will try again later: %s", path)
+        with self._lock:
+            self._next_locked_try[file_id] = _now() + IN_USE_RETRY_SECONDS
+        self.db.set_file_status(file_id, "waiting_in_use", WAITING_IN_USE)
 
     # ---- Steps 1 and 2: decide whether to work on it at all ----
 
@@ -366,9 +421,15 @@ class Worker:
             logger.info("No longer there: %s", file.path)
             self.db.set_file_status(file.id, "missing")
             return True
+        except PermissionError:
+            self._wait_for_lock(file.id, file.path)
+            return True
         except OSError as exc:
             logger.error("Could not read %s: %s", file.path, exc)
             self.db.set_file_status(file.id, "failed", UNREADABLE)
+            return True
+        if _is_locked(file.path):
+            self._wait_for_lock(file.id, file.path)
             return True
         size, mtime = info_stat.st_size, info_stat.st_mtime
         try:
@@ -388,6 +449,15 @@ class Worker:
                                 **details)
             return True
 
+        out_ext = output_extension(info, decision)
+        final = os.path.splitext(file.path)[0] + out_ext
+        if (os.path.normcase(final) != os.path.normcase(file.path)
+                and os.path.lexists(ext_path(final))):
+            logger.error("%s can't be converted, because %s already exists", file.path, final)
+            self.db.upsert_file(library.id, file.path, size, mtime, "failed", TARGET_TAKEN,
+                                **details)
+            return True
+
         try:
             scratch_room = free_bytes(scratch)
         except OSError as exc:
@@ -404,7 +474,7 @@ class Worker:
         self.db.upsert_file(library.id, file.path, size, mtime, "working", **details)
         folder = scratch / "ShelfSaver" / f"run-{run.id}"
         job = _Job(file, library, size, mtime, info, decision, run, folder,
-                   folder / f"output{output_extension(info, decision)}")
+                   folder / f"output{out_ext}")
         return self._guarded(job, self._convert_and_check)
 
     # ---- Failure handling shared by every step of a run ----
@@ -417,6 +487,10 @@ class Worker:
         except _Stopped:
             logger.info("Stopped, and will start again: %s", job.file.path)
             self._end_and_requeue(job, STOPPED_NOTE)
+        except _SourceLocked:
+            self._end_run(job.run.id, "interrupted", LOCKED_NOTE)
+            self._delete_run_files(job)
+            self._wait_for_lock(job.file.id, job.file.path)
         except _RunFailed as exc:
             logger.error("%s: %s\n%s", job.file.path, exc, job.log_tail)
             self._fail_run(job, str(exc))
@@ -438,6 +512,9 @@ class Worker:
 
     @staticmethod
     def _delete_temp(path) -> None:
+        if Path(path).parent.name.lower() != "incoming":
+            logger.error("Refusing to delete %s, because it isn't in an incoming folder", path)
+            return
         try:
             os.unlink(ext_path(path))
         except FileNotFoundError:
@@ -463,7 +540,7 @@ class Worker:
         self._delete_run_files(job)
 
     def _end_and_requeue(self, job: _Job, note: str) -> None:
-        self._end_run(job.run.id, "failed", note)
+        self._end_run(job.run.id, "interrupted", note)
         self.db.requeue([job.file.id])
         self._delete_run_files(job)
 
@@ -490,7 +567,13 @@ class Worker:
         job.log_tail = result.log_tail
         self.db.update_run(job.run.id, log_tail=result.log_tail)
 
-        if result.returncode != 0:
+        out_info = None
+        if result.returncode == 0:
+            try:
+                out_info = probe(job.output, self.config.ffprobe)
+            except ProbeError as exc:
+                logger.error("FFmpeg's result for %s can't be read: %s", job.file.path, exc)
+        if out_info is None:
             if result.stopped or self._should_stop():
                 raise _Stopped()
             self._encoder_failed(job, result)
@@ -517,14 +600,9 @@ class Worker:
                 return True
             raise _RunFailed(verdict.reason)
 
-        now_size = os.stat(ext_path(job.output)).st_size
-        try:
-            out_info = probe(job.output, self.config.ffprobe)
-            now_format, now_bitrate = _format_name(out_info.video_codec), out_info.video_bitrate
-        except ProbeError:  # it just passed the checks, so this only costs a history detail
-            now_format, now_bitrate = None, None
         self.db.update_run(
-            job.run.id, now_size=now_size, now_format=now_format, now_bitrate=now_bitrate,
+            job.run.id, now_size=os.stat(ext_path(job.output)).st_size,
+            now_format=_format_name(out_info.video_codec), now_bitrate=out_info.video_bitrate,
             tracks_json=_tracks_json(job.info, job.decision),
         )
         return self._place_new_file(job)
@@ -629,13 +707,16 @@ class Worker:
         try:
             plan, size, mtime = _load_swap(run.swap_json)
         except (ValueError, TypeError, KeyError) as exc:
-            self._keep_swapping(run.id, run.file_id, f"a damaged saved plan ({exc})")
+            self._keep_swapping(run.id, run.file_id, f"a damaged saved plan ({exc})",
+                                SWAP_RECORD_LOST)
             return
 
         self._set_status("working", plan.original, "Replacing")
         logger.info("Replacing: %s", plan.original)
         try:
             outcome = recover_swap(plan)
+            if outcome == "unexpected" and target_is_taken(plan):
+                raise TargetExists(f"A different file is in the way for {plan.original}")
             if outcome == "not_started":
                 if not _matches(plan.original, size, mtime):
                     self._original_changed(run, plan)
@@ -658,16 +739,16 @@ class Worker:
         logger.info("In use, will try again later: %s", plan.original)
         with self._lock:
             self._next_swap_try[run.id] = _now() + IN_USE_RETRY_SECONDS
-        self.db.update_run(run.id, state="waiting_in_use", step="Replacing")
+        self.db.update_run(run.id, state="waiting_in_use", step="Replacing", error=None)
         self.db.set_file_status(run.file_id, "waiting_in_use", WAITING_IN_USE)
         # The verified copy is on the library's volume now, so free the scratch disk.
         self._delete_run_scratch(run)
 
-    def _keep_swapping(self, run_id: int, file_id: int, why: str) -> None:
+    def _keep_swapping(self, run_id: int, file_id: int, why: str, reason: str = SWAP_KEPT) -> None:
         """The temp file may be the only copy of the new file, so nothing is cleaned up."""
         logger.error("Keeping run %s for a later attempt, because of %s", run_id, why)
-        self.db.update_run(run_id, state="swapping", error=SWAP_KEPT)
-        self.db.set_file_status(file_id, "failed", SWAP_KEPT)
+        self.db.update_run(run_id, state="swapping", error=reason)
+        self.db.set_file_status(file_id, "failed", reason)
 
     def _target_taken(self, run: Run, plan: SwapPlan, size: int, mtime: float, exc) -> None:
         try:
@@ -684,7 +765,7 @@ class Worker:
 
     def _original_changed(self, run: Run, plan: SwapPlan) -> None:
         logger.info("The original changed before it could be replaced: %s", plan.original)
-        self._end_run(run.id, "failed", CHANGED_NOTE)
+        self._end_run(run.id, "interrupted", CHANGED_NOTE)
         self.db.requeue([run.file_id])
         self._clean_up_swap(run, plan)
 
@@ -748,7 +829,11 @@ class Worker:
                 logger.exception("Could not recover run %s", run.id)
 
         for run in self.db.active_runs(("running",)):
-            self._end_run(run.id, "failed", INTERRUPTED_NOTE)
+            if self._looks_mid_swap(run):
+                self._keep_swapping(run.id, run.file_id, "an original that is gone while its "
+                                    "new file is still waiting", SWAP_RECORD_LOST)
+            else:
+                self._end_run(run.id, "interrupted", INTERRUPTED_NOTE)
         still_swapping = {r.file_id for r in self.db.active_runs(SWAP_STATES)}
         working = [f.id for f in self.db.files_with_status("working")
                    if f.id not in still_swapping]
@@ -759,6 +844,24 @@ class Worker:
         self._delete_leftover_run_folders()
         self._delete_orphan_incoming_files()
         self._set_idle()
+
+    def _looks_mid_swap(self, run: Run) -> bool:
+        """True if a run with no saved plan may have started swapping anyway.
+
+        With its original gone and its temp file there, the temp can be the only new copy and
+        the original can be in the holding folder. Nothing proves which files are which without
+        the plan, so they are left for the owner. Keeping the run in `swapping` also stops the
+        holding folder being cleared.
+        """
+        record = self.db.run_record(run.id)
+        original = record and record["file_path"]
+        if not original or os.path.lexists(ext_path(original)):
+            return False
+        try:
+            found = _list_folder(work_root(original) / "incoming")
+        except OSError:
+            return False
+        return any(Path(entry.name).stem == str(run.id) for entry in found)
 
     def _delete_leftover_run_folders(self) -> None:
         setting = self.db.get_setting("scratch_dir")
@@ -786,7 +889,7 @@ class Worker:
                 logger.warning("Could not clean %s: %s", entry.path, exc)
 
     def _delete_orphan_incoming_files(self) -> None:
-        active = {str(r.id) for r in self.db.active_runs(("running", *SWAP_STATES))}
+        planned = self._planned_temp_ids()
         folders = {os.path.normcase(str(work_root(lib.path) / "incoming")):
                    work_root(lib.path) / "incoming" for lib in self.db.list_libraries()}
         for folder in folders.values():
@@ -802,9 +905,34 @@ class Worker:
                 continue
             for entry in entries:
                 try:
-                    if (entry.is_file(follow_symlinks=False)
-                            and Path(entry.name).stem not in active):
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if self._is_clear_orphan(entry.path, planned):
                         logger.info("Removing a leftover file: %s", entry.path)
                         self._delete_temp(entry.path)
+                    else:
+                        logger.error("Keeping %s, because it may be the only copy of a new "
+                                     "file", entry.path)
                 except OSError as exc:
                     logger.warning("Could not clean %s: %s", entry.path, exc)
+
+    def _planned_temp_ids(self) -> set[int]:
+        ids = set()
+        for run in self.db.active_runs(RUN_STATES):
+            if run.swap_json:
+                try:
+                    ids.add(_load_swap(run.swap_json)[0].temp_file_id)
+                except (ValueError, TypeError, KeyError):
+                    continue
+        return ids
+
+    def _is_clear_orphan(self, path: str, planned: set[int]) -> bool:
+        """True only if no plan names this file, and the run its name points to has ended with
+        its original still in place. `lexists` reads any disk error as absent, which keeps it."""
+        if os.lstat(ext_path(path)).st_ino in planned:
+            return False
+        stem = Path(path).stem
+        record = self.db.run_record(int(stem)) if stem.isdecimal() else None
+        if record is None or record["state"] in ("running", *SWAP_STATES):
+            return False
+        return bool(record["file_path"]) and os.path.lexists(ext_path(record["file_path"]))

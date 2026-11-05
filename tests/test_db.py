@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from shelfsaver.db import Database
@@ -18,6 +20,26 @@ def test_next_queued_returns_largest_first(db, lib):
     db.upsert_file(lib.id, "a.mkv", 100, 1.0, "queued")
     db.upsert_file(lib.id, "b.mkv", 900, 1.0, "queued")
     assert db.next_queued().path == "b.mkv"
+
+
+def test_every_connection_commits_durably(tmp_path):
+    first = Database(tmp_path / "a.db")
+    first.close()
+    second = Database(tmp_path / "a.db")
+    assert second._query("PRAGMA synchronous")[0][0] == 2  # FULL
+    readings = []
+    thread = threading.Thread(
+        target=lambda: readings.append(second._query("PRAGMA synchronous")[0][0]))
+    thread.start()
+    thread.join()
+    assert readings == [2]
+
+
+def test_run_record_includes_the_starting_path(db, lib):
+    f = db.upsert_file(lib.id, "a.mkv", 100, 1.0, "queued")
+    run = db.start_run(f.id, 100, "H.264", None, "why")
+    assert db.run_record(run.id)["file_path"] == "a.mkv"
+    assert db.run_record(run.id + 1) is None
 
 
 def test_next_queued_can_skip_libraries(db, lib):

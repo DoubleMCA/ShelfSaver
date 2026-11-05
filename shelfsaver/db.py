@@ -104,7 +104,8 @@ class Database:
             conn = sqlite3.connect(self.path, timeout=30)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # FULL: a committed swap record must survive a power cut, because files move next.
+            conn.execute("PRAGMA synchronous=FULL")
             self._local.conn = conn
         return conn
 
@@ -252,6 +253,11 @@ class Database:
              "starting", time.time(), was_size, was_format, was_bitrate, why),
         )
         return self._get_run(cur.lastrowid)
+
+    def run_record(self, run_id: int) -> Optional[dict]:
+        """Every column of a run, including the path it started from."""
+        rows = self._query("SELECT * FROM runs WHERE id=?", (run_id,))
+        return dict(rows[0]) if rows else None
 
     def _get_run(self, run_id: int) -> Run:
         return _run(self._query("SELECT * FROM runs WHERE id=?", (run_id,))[0])

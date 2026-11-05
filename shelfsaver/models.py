@@ -9,7 +9,7 @@ FILE_STATUSES = (
     "queued", "working", "converted", "skipped", "failed", "waiting_in_use", "missing",
 )
 RUN_STATES = (
-    "running", "swapping", "waiting_in_use", "done", "failed", "not_worth_it",
+    "running", "swapping", "waiting_in_use", "done", "failed", "not_worth_it", "interrupted",
 )
 
 
