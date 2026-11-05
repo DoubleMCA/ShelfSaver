@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Queue - ShelfSaver</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="queue">
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="/">ShelfSaver</a>
+    <nav class="top-links" aria-label="Main">
+      <a href="/">Home</a>
+      <a href="/queue" aria-current="page">Queue</a>
+      <a href="/settings">Settings</a>
+    </nav>
+  </header>
+  <div id="offline" class="floating" role="status" hidden>Can't reach ShelfSaver. Trying again&hellip;</div>
+  <h1>Queue</h1>
+  <div id="message" role="status"></div>
+  <section id="now" class="card" aria-live="polite"></section>
+  <p id="queue-summary" class="muted small"></p>
+  <div id="queue"></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -132,11 +132,40 @@ def add_library(authed, folder, name="Movies", **extra):
 
 def test_everything_requires_sign_in(client):
     assert client.get("/api/status").status_code == 401
-    for method, url in [("get", "/api/history"), ("get", "/api/libraries"),
+    for method, url in [("get", "/api/history"), ("get", "/api/libraries"), ("get", "/api/queue"),
                         ("get", "/api/settings"), ("get", "/api/browse"),
                         ("post", "/api/pause"), ("post", "/api/holding/clear"),
                         ("post", "/api/files/1/retry"), ("post", "/api/files/1/resolve")]:
         assert getattr(client, method)(url).status_code == 401, url
+
+
+def test_queue_shows_waiting_files_next_first(authed, parts):
+    db, *_ = parts
+    lib = db.add_library("TV", "F:\\TV", "medium", False)
+    db.upsert_file(lib.id, "F:\\TV\\small.mkv", 100, 1.0, "queued", resolution="640x480")
+    db.upsert_file(lib.id, "F:\\TV\\big.mkv", 300, 1.0, "queued", resolution="1920x1080")
+    db.upsert_file(lib.id, "F:\\TV\\done.mkv", 900, 1.0, "converted")
+    body = authed.get("/api/queue").json()
+    assert body["total_files"] == 2 and body["total_bytes"] == 400
+    assert [r["name"] for r in body["items"]] == ["big.mkv", "small.mkv"]
+    assert body["items"][0] == {"id": body["items"][0]["id"], "name": "big.mkv", "library": "TV",
+                                "size": 300, "resolution": "1920x1080"}
+
+
+def test_queue_pages_through_a_long_line(authed, parts):
+    db, *_ = parts
+    lib = db.add_library("TV", "F:\\TV", "medium", False)
+    for size in (100, 200, 300):
+        db.upsert_file(lib.id, f"F:\\TV\\{size}.mkv", size, 1.0, "queued")
+    body = authed.get("/api/queue", params={"limit": 1, "offset": 1}).json()
+    assert [r["size"] for r in body["items"]] == [200] and body["total_files"] == 3
+    assert authed.get("/api/queue", params={"limit": 0}).status_code == 400
+    assert authed.get("/api/queue", params={"offset": -1}).status_code == 400
+
+
+def test_every_page_links_to_the_queue(client):
+    for page in ("/", "/library", "/settings", "/queue"):
+        assert 'href="/queue"' in client.get(page).text, page
 
 
 def test_first_visit_sets_password_once(client):
@@ -1090,11 +1119,18 @@ def test_history_filters_on_the_server_so_paging_can_reach_every_match(authed, p
         rows = authed.get("/api/history", params={"show": show, **params}).json()
         return [r["name"] for r in rows]
 
-    assert names("attention", limit=2) == ["stopped.mkv", "old-failure.mkv"]
-    assert names("converted") == ["done.mkv"]
-    assert names("skipped", limit=2, offset=1) == ["s3.mkv", "s2.mkv"]
+    assert names("conversions") == ["stopped.mkv", "done.mkv"]
+    assert names("scans", limit=2, offset=1) == ["s3.mkv", "s2.mkv"]
+    assert names("scans")[-1] == "old-failure.mkv"
     assert len(names("all")) == 8
     assert authed.get("/api/history", params={"show": "nonsense"}).status_code == 400
+
+
+def test_home_and_library_pages_have_room_for_the_history_tabs(client):
+    for page in ("/", "/library"):
+        assert 'id="filters"' in client.get(page).text, page
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "Conversion history" in app_js and "Scan history" in app_js
 
 
 def test_try_again_is_offered_for_a_scan_failure_but_not_a_skip(authed, parts):

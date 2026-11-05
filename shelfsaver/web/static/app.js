@@ -382,20 +382,20 @@
 
   // ---- history table, used on Home and on a library's page
 
-  var GROUPS = {
-    converted: ['converted'],
-    skipped: ['skipped'],
-    attention: ['failed', 'interrupted', 'waiting_in_use', 'missing']
+  var HISTORY_TABS = {
+    conversions: { label: 'Conversion history', kind: 'run', empty: 'Nothing has been converted yet.' },
+    scans: { label: 'Scan history', kind: 'file',
+      empty: 'Nothing here yet. Files ShelfSaver looks at and leaves alone will show up here.' }
   };
 
   function createHistory(container, options) {
     var state = {
-      limit: PAGE_SIZE, openId: null, rows: [], details: {}, filter: options.filter || 'all',
+      limit: PAGE_SIZE, openId: null, rows: [], details: {}, filter: 'conversions',
       signature: ''
     };
     var tbody = el('tbody');
     var more = el('p', { class: 'empty', hidden: true });
-    var empty = el('div', { class: 'empty', hidden: true, text: options.emptyText });
+    var empty = el('div', { class: 'empty', hidden: true, text: HISTORY_TABS[state.filter].empty });
     var table = el('table', null,
       el('thead', null, el('tr', null,
         el('th', { scope: 'col', text: 'File' }), el('th', { scope: 'col', class: 'hide-s', text: 'Was' }),
@@ -404,8 +404,8 @@
     add(container, [el('div', { class: 'table-wrap' }, table, empty), more]);
 
     function visible() {
-      var allowed = GROUPS[state.filter];
-      return state.rows.filter(function (row) { return !allowed || allowed.indexOf(row.status) >= 0; });
+      var kind = HISTORY_TABS[state.filter].kind;
+      return state.rows.filter(function (row) { return row.kind === kind; });
     }
 
     function savedPercent(row) {
@@ -622,7 +622,7 @@
 
     function refresh() {
       var query = '?limit=' + state.limit + (options.libraryId ? '&library_id=' + options.libraryId : '') +
-        (state.filter !== 'all' ? '&show=' + state.filter : '');
+        '&show=' + state.filter;
       return api('GET', '/api/history' + query).then(function (rows) {
         state.rows = rows;
         var open = rows.filter(function (r) { return r.id === state.openId; })[0];
@@ -635,10 +635,25 @@
       setFilter: function (value) {
         state.filter = value;
         state.limit = PAGE_SIZE;
+        empty.textContent = HISTORY_TABS[value].empty;
         render(true);
         return refresh();
       }
     };
+  }
+
+  function drawHistoryTabs(box, history) {
+    var chosen = 'conversions';
+    function draw() {
+      clear(box);
+      Object.keys(HISTORY_TABS).forEach(function (key) {
+        add(box, [el('button', {
+          type: 'button', class: 'small', text: HISTORY_TABS[key].label, 'aria-pressed': chosen === key ? 'true' : 'false',
+          onclick: function () { chosen = key; draw(); history.setFilter(key); }
+        })]);
+      });
+    }
+    draw();
   }
 
   // ---- notices
@@ -717,10 +732,8 @@
   }
 
   function initHome() {
-    var history = createHistory(byId('history'), {
-      showLibrary: true,
-      emptyText: 'Nothing here yet. Once ShelfSaver has looked at your files, they will show up here.'
-    });
+    var history = createHistory(byId('history'), { showLibrary: true });
+    drawHistoryTabs(byId('filters'), history);
     var pause = byId('pause');
     var paused = false;
 
@@ -765,30 +778,71 @@
     every(refresh);
   }
 
+  // ---- The queue
+
+  var QUEUE_MOST = 500;
+
+  function initQueue() {
+    var limit = PAGE_SIZE;
+    var signature = '';
+    var tbody = el('tbody');
+    var empty = el('div', { class: 'empty', hidden: true, text: 'Nothing is waiting to be converted.' });
+    var table = el('table', null,
+      el('thead', null, el('tr', null,
+        el('th', { scope: 'col', class: 'place', text: '#' }), el('th', { scope: 'col', text: 'File' }),
+        el('th', { scope: 'col', text: 'Size' }))),
+      tbody);
+    var more = el('p', { class: 'empty', hidden: true });
+    add(byId('queue'), [el('div', { class: 'table-wrap' }, table, empty), more]);
+
+    function draw(queue) {
+      var seen = JSON.stringify([queue, limit]);
+      if (seen === signature) return;
+      signature = seen;
+      byId('queue-summary').textContent = queue.total_files
+        ? fmtCount(queue.total_files) + (queue.total_files === 1 ? ' file' : ' files') + ' waiting · ' +
+          fmtSize(queue.total_bytes) + ' · The largest files go first.'
+        : '';
+      table.hidden = !queue.items.length;
+      empty.hidden = !!queue.items.length;
+      fill(tbody, queue.items.map(function (row, index) {
+        return el('tr', null,
+          el('td', { class: 'num', text: fmtCount(index + 1) }),
+          el('td', { class: 'name' }, row.name, el('span', { class: 'sub', text: row.library })),
+          el('td', { class: 'num' }, fmtSize(row.size),
+            row.resolution ? el('span', { class: 'sub', text: row.resolution }) : null));
+      }));
+      var hidden = queue.total_files - queue.items.length;
+      more.hidden = hidden <= 0;
+      if (hidden > 0 && limit < QUEUE_MOST) {
+        fill(more, el('button', {
+          type: 'button', class: 'small', text: 'Show more',
+          onclick: function () { limit = Math.min(limit + PAGE_SIZE, QUEUE_MOST); refresh(); }
+        }));
+      } else if (hidden > 0) {
+        more.textContent = 'Showing the next ' + fmtCount(queue.items.length) + ' files.';
+      }
+    }
+
+    function refresh() {
+      return Promise.all([api('GET', '/api/status'), api('GET', '/api/queue?limit=' + limit)]).then(function (all) {
+        showNotices(byId('message'), all[0]);
+        drawNow(byId('now'), all[0]);
+        draw(all[1]);
+      }, function () { /* offline: the notice is already showing */ });
+    }
+
+    every(refresh);
+  }
+
   // ---- A library
 
   function initLibrary() {
     var id = Number((new URLSearchParams(window.location.search)).get('id'));
     var head = byId('library-head');
-    var filters = byId('filters');
-    var history = createHistory(byId('history'), {
-      libraryId: id, showLibrary: false,
-      emptyText: 'No files to show here yet.'
-    });
+    var history = createHistory(byId('history'), { libraryId: id, showLibrary: false });
+    drawHistoryTabs(byId('filters'), history);
     var current = null;
-    var chosen = 'all';
-
-    function drawFilters() {
-      clear(filters);
-      [['all', 'Everything'], ['converted', 'Converted'], ['skipped', 'Skipped'], ['attention', 'Needs a look']]
-        .forEach(function (pair) {
-          add(filters, [el('button', {
-            type: 'button', class: 'small', text: pair[1], 'aria-pressed': chosen === pair[0] ? 'true' : 'false',
-            onclick: function () { chosen = pair[0]; drawFilters(); history.setFilter(chosen); }
-          })]);
-        });
-    }
-    drawFilters();
 
     function openOptions(lib) {
       openDialog(function (dialog) {
@@ -1046,6 +1100,7 @@
 
   if (page === 'home') initHome();
   else if (page === 'library') initLibrary();
+  else if (page === 'queue') initQueue();
   else if (page === 'settings') initSettings();
   else if (page === 'login') initLogin();
 })();

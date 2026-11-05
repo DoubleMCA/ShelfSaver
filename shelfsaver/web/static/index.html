@@ -14,6 +14,7 @@
     <a class="brand" href="/">ShelfSaver</a>
     <nav class="top-links" aria-label="Main">
       <a href="/" aria-current="page">Home</a>
+      <a href="/queue">Queue</a>
       <a href="/settings">Settings</a>
       <button id="pause" type="button" class="small" title="Stops converting. The file being converted will start over when you resume." hidden>Pause</button>
     </nav>
@@ -34,6 +35,7 @@
   <h2>Libraries</h2>
   <div class="libs" id="libs"></div>
   <h2 id="history-title">History</h2>
+  <div class="filters" id="filters" role="group" aria-label="Show"></div>
   <div id="history"></div>
 </div>
 <script src="/static/app.js"></script>

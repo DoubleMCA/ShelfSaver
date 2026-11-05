@@ -84,6 +84,7 @@ RUN_FIELDS = {
 }
 RUN_COLUMNS = ["id", "file_id", *sorted(RUN_FIELDS)]
 HELD_VOLUMES = "held_volumes"
+QUEUE_ORDER = "size DESC, id"  # biggest first, as they save the most
 RUNLESS_HISTORY_STATUSES = ("skipped", "failed", "missing", "waiting_in_use")
 # What a run's row in the history says: a run a restart ended is not a failure of the file.
 _RUN_ROW_STATUS = (
@@ -326,10 +327,20 @@ class Database:
         skip = list(skip_libraries)
         not_in = f" AND library_id NOT IN ({','.join('?' * len(skip))})" if skip else ""
         rows = self._query(
-            f"SELECT * FROM files WHERE status='queued'{not_in} ORDER BY size DESC, id LIMIT 1",
+            f"SELECT * FROM files WHERE status='queued'{not_in} ORDER BY {QUEUE_ORDER} LIMIT 1",
             skip,
         )
         return _file(rows[0]) if rows else None
+
+    def queued_files(self, limit: int, offset: int = 0) -> list[FileRow]:
+        return [_file(r) for r in self._query(
+            f"SELECT * FROM files WHERE status='queued' ORDER BY {QUEUE_ORDER} LIMIT ? OFFSET ?",
+            (limit, offset))]
+
+    def queue_totals(self) -> dict:
+        row = self._query("SELECT COUNT(*) AS files, COALESCE(SUM(size),0) AS bytes FROM files"
+                          " WHERE status='queued'")[0]
+        return {"files": row["files"], "bytes": row["bytes"]}
 
     def files_with_status(self, status: str) -> list[FileRow]:
         return [_file(r) for r in self._query(
@@ -436,7 +447,7 @@ class Database:
 
     def timeline(
         self, library_id: Optional[int] = None, limit: int = 100, offset: int = 0,
-        statuses: Optional[Iterable[str]] = None,
+        kind: Optional[str] = None,
     ) -> list[dict]:
         """Runs, and files that never had one, most recently updated first.
 
@@ -448,10 +459,9 @@ class Database:
         if library_id is not None:
             where.append("library_id=?")
             args.append(library_id)
-        if statuses is not None:
-            statuses = list(statuses)
-            where.append(f"status IN ({','.join('?' * len(statuses))})")
-            args.extend(statuses)
+        if kind is not None:
+            where.append("kind=?")
+            args.append(kind)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         rows = self._query(
             "SELECT kind, id, status, at FROM ("

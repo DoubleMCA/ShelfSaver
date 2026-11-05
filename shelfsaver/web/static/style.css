@@ -243,6 +243,7 @@ th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spa
 tr:last-child td { border-bottom: 0; }
 td.name { font-weight: 600; word-break: break-word; min-width: 140px; }
 td.num { white-space: nowrap; }
+th.place { width: 1%; }
 tr.row { cursor: pointer; }
 tr.row:hover td { background: var(--open); }
 tr.row[aria-expanded="true"] td { background: var(--open); }

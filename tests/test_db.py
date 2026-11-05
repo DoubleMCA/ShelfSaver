@@ -88,6 +88,16 @@ def test_stats_count_every_file_still_in_the_library(db, lib):
     assert db.stats()["total"] == 5
 
 
+def test_queue_lists_files_in_the_order_they_will_be_converted(db, lib):
+    for name, size in (("small.mkv", 10), ("big.mkv", 30), ("tie-a.mkv", 20), ("tie-b.mkv", 20)):
+        db.upsert_file(lib.id, name, size, 1.0, "queued")
+    db.upsert_file(lib.id, "skipped.mkv", 99, 1.0, "skipped")
+    assert [f.path for f in db.queued_files(10)] == ["big.mkv", "tie-a.mkv", "tie-b.mkv", "small.mkv"]
+    assert [f.path for f in db.queued_files(2, offset=1)] == ["tie-a.mkv", "tie-b.mkv"]
+    assert db.next_queued().path == db.queued_files(1)[0].path
+    assert db.queue_totals() == {"files": 4, "bytes": 80}
+
+
 def test_settings_round_trip_and_default(db):
     assert db.get_setting("scratch_dir") is None
     db.set_setting("scratch_dir", "E:\\work")
@@ -260,7 +270,8 @@ def test_timeline_merges_runs_and_runless_files_newest_first(db, lib):
     keys = [(i["kind"], i["id"]) for i in db.timeline()]
     assert keys == [("file", skipped.id), ("run", run.id), ("file", failed.id)]
     assert [(i["kind"], i["id"]) for i in db.timeline(limit=1, offset=1)] == [("run", run.id)]
-    assert [i["id"] for i in db.timeline(limit=5, statuses=("failed",))] == [failed.id]
+    assert [i["id"] for i in db.timeline(kind="run")] == [run.id]
+    assert [i["id"] for i in db.timeline(kind="file")] == [skipped.id, failed.id]
     assert db.timeline(library_id=lib.id + 1) == []
 
 

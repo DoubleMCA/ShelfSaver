@@ -38,15 +38,11 @@ LOGIN_WINDOW_SECONDS = 60.0
 LEVELS = ("low", "medium", "high")
 ACTIVE_RUN_STATES = ("running", "swapping", "waiting_in_use")
 MAX_PAGE = 500
-HISTORY_GROUPS = {
-    "converted": ("converted",),
-    "skipped": ("skipped",),
-    "attention": ("failed", "interrupted", "waiting_in_use", "missing"),
-}
+HISTORY_KINDS = {"conversions": "run", "scans": "file"}
 HELD_CACHE_SECONDS = 30.0
 STATIC_DIR = Path(__file__).parent / "static"
-PAGES = {"/": "index.html", "/library": "library.html", "/settings": "settings.html",
-         "/login": "login.html"}
+PAGES = {"/": "index.html", "/library": "library.html", "/queue": "queue.html",
+         "/settings": "settings.html", "/login": "login.html"}
 DRIVE_REMOTE = 4
 HIDDEN_OR_SYSTEM = 0x2 | 0x4  # FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
 
@@ -423,12 +419,27 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     # ---- history and files
 
+    @api.get("/queue")
+    def queue(limit: int = 100, offset: int = 0):
+        if not 1 <= limit <= MAX_PAGE or offset < 0:
+            raise _fail(400, f"Ask for between 1 and {MAX_PAGE} rows at a time.")
+        names = {l.id: l.name for l in db.list_libraries()}
+        totals = db.queue_totals()
+        return {
+            "total_files": totals["files"],
+            "total_bytes": totals["bytes"],
+            "items": [{"id": f.id, "name": os.path.basename(f.path.replace("\\", "/")),
+                       "library": names.get(f.library_id, ""), "size": f.size,
+                       "resolution": f.resolution}
+                      for f in db.queued_files(limit, offset)],
+        }
+
     @api.get("/history")
     def history(library_id: Optional[int] = None, limit: int = 100, offset: int = 0,
                 show: str = "all"):
         if not 1 <= limit <= MAX_PAGE or offset < 0:
             raise _fail(400, f"Ask for between 1 and {MAX_PAGE} rows at a time.")
-        if show != "all" and show not in HISTORY_GROUPS:
+        if show != "all" and show not in HISTORY_KINDS:
             raise _fail(400, "That isn't one of the choices for what to show.")
         names = {l.id: l.name for l in db.list_libraries()}
 
@@ -493,7 +504,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                 "updated_at": item["at"],
             }
 
-        items = db.timeline(library_id, limit, offset, HISTORY_GROUPS.get(show))
+        items = db.timeline(library_id, limit, offset, HISTORY_KINDS.get(show))
         return [run_row(i) if i["kind"] == "run" else file_row(i) for i in items]
 
     @api.get("/files/{file_id}")
