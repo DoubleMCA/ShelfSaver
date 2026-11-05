@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 from .models import MediaInfo, Stream
@@ -159,3 +160,64 @@ def probe(path, ffprobe) -> MediaInfo:
     except ValueError as exc:
         raise ProbeError("File could not be read") from exc
     return parse_probe(data, path, size)
+
+
+class ScanStopped(Exception):
+    """A packet scan was interrupted by a stop request."""
+
+
+def stream_end_times(path, ffprobe, should_stop=lambda: False) -> dict:
+    """Latest packet end time (seconds) for every stream, keyed by stream index.
+
+    Raises ProbeError if the scan fails and ScanStopped if should_stop() turns true.
+    """
+    cmd = [str(ffprobe), "-v", "error", "-show_entries", "packet=stream_index,pts_time,duration_time",
+           "-of", "csv=p=0", str(path)]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, creationflags=flags)
+    except OSError as exc:
+        raise ProbeError(f"Could not read file: {exc}") from exc
+    errors = bytearray()
+
+    def drain():
+        for chunk in iter(lambda: proc.stderr.read(4096), b""):
+            if len(errors) < 65536:
+                errors.extend(chunk)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    ends: dict = {}
+    stopped = False
+    try:
+        for n, raw in enumerate(proc.stdout):
+            if n % 2000 == 0 and should_stop():
+                stopped = True
+                break
+            parts = raw.decode("utf-8", "replace").strip().split(",")
+            if len(parts) < 2:
+                continue
+            index, pts = _int(parts[0]), _float(parts[1])
+            if index is None or pts is None:
+                continue
+            dur = _float(parts[2]) if len(parts) > 2 else None
+            end = pts + (dur or 0.0)
+            if end > ends.get(index, float("-inf")):
+                ends[index] = end
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        proc.wait()
+        reader.join(timeout=5)
+        proc.stdout.close()
+        proc.stderr.close()
+    if stopped:
+        raise ScanStopped()
+    if proc.returncode != 0 or errors.strip():
+        raise ProbeError("File could not be scanned")
+    return ends

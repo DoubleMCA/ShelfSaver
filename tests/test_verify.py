@@ -1,5 +1,5 @@
 import dataclasses
-import random
+import subprocess
 
 import pytest
 
@@ -118,20 +118,102 @@ def test_length_failure_with_small_output_is_not_flagged_not_worth_it(tmp_path):
     assert not r.not_worth_it and r.checks["length"] is False
 
 
-def test_corrupt_middle_fails_plays(tmp_path):
-    src = _src(tmp_path, crf=10)
-    out = _out(tmp_path, crf=18)
-    data = bytearray(out.read_bytes())
-    mid = len(data) // 2
-    rng = random.Random(1)
-    data[mid:mid + 4000] = bytes(rng.randrange(256) for _ in range(4000))
-    out.write_bytes(bytes(data))
-    src = dataclasses.replace(src, size=out.stat().st_size * 10)
+def _mux(tmp_path, name, video, video_t, audio, audio_t):
+    """Copy video (limited to video_t seconds) and audio (to audio_t) into one mkv."""
+    out = tmp_path / name
+    subprocess.run(["ffmpeg", "-y", "-v", "error",
+                    "-t", str(video_t), "-i", str(video), "-t", str(audio_t), "-i", str(audio),
+                    "-map", "0:v", "-map", "1:a", "-c", "copy", str(out)], check=True)
+    return out
+
+
+def _probed_with_size(src, size):
+    return dataclasses.replace(src, size=size)
+
+
+def test_short_video_with_full_audio_fails_length(tmp_path):
+    base = _out(tmp_path, "base.mkv")
+    src = _src(tmp_path)
+    out = _mux(tmp_path, "o.mkv", base, 2, base, 4)
+    r = verify_output(_probed_with_size(src, out.stat().st_size * 10), out, convert(),
+                      "ffmpeg", "ffprobe")
+    assert not r.passed and r.checks["length"] is False and r.checks["plays"] is False
+
+
+def test_short_audio_with_full_video_fails_length(tmp_path):
+    base = _out(tmp_path, "base.mkv")
+    src = _src(tmp_path)
+    out = _mux(tmp_path, "o.mkv", base, 4, base, 2)
+    r = verify_output(_probed_with_size(src, out.stat().st_size * 10), out, convert(),
+                      "ffmpeg", "ffprobe")
+    assert not r.passed and r.checks["length"] is False
+
+
+def test_source_with_differing_stream_lengths_passes_when_output_matches(tmp_path):
+    h264 = make_video(tmp_path / "h264.mkv", seconds=4, size=SIZE, crf=10)
+    src_file = _mux(tmp_path, "src.mkv", h264, 4, h264, 2)
+    src = probe(src_file, "ffprobe")
+    h265 = _out(tmp_path, "h265.mkv")
+    out = _mux(tmp_path, "o.mkv", h265, 4, h265, 2)
     r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
-    assert not r.passed
+    assert r.passed, r
+
+
+def test_stop_during_length_scan(pair):
+    r = verify_output(*pair, should_stop=lambda: True)
+    assert r.reason == "Stopped" and not r.passed
+
+
+def _cover_first_with_noise(tmp_path, noisy=True):
+    """mkv whose first video stream is cover art and whose HEVC packets are damaged."""
+    base = _out(tmp_path, "base.mkv", crf=18)
+    cover = tmp_path / "cover.jpg"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc2=size=64x64:rate=1:duration=1", "-frames:v", "1", str(cover)],
+                   check=True)
+    out = tmp_path / "cover_first.mkv"
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(cover), "-i", str(base),
+           "-map", "0:v", "-map", "1:v", "-map", "1:a", "-c", "copy",
+           "-disposition:v:0", "attached_pic"]
+    if noisy:
+        cmd += ["-bsf:v:1", "noise=amount=400"]
+    subprocess.run(cmd + [str(out)], check=True)
+    return out
+
+
+def test_cover_first_file_with_damaged_video_fails_plays(tmp_path):
+    out = _cover_first_with_noise(tmp_path)
+    streams = probe(out, "ffprobe").streams
+    assert streams[0].is_cover_art and streams[0].kind == "video"
+    src = dataclasses.replace(_src(tmp_path), size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
     assert r.checks["length"] and r.checks["tracks"] and r.checks["smaller"]
-    assert r.checks["plays"] is False
+    assert r.checks["plays"] is False and not r.passed
     assert r.reason == "New file failed the playback check"
+
+
+def test_cover_first_file_with_good_video_passes(tmp_path):
+    out = _cover_first_with_noise(tmp_path, noisy=False)
+    src = dataclasses.replace(_src(tmp_path), size=out.stat().st_size * 10)
+    assert verify_output(src, out, convert(), "ffmpeg", "ffprobe").passed
+
+
+def test_changed_primaries_on_hdr_source_fails_tracks(tmp_path):
+    src = _src(tmp_path, vcodec="libx265", hdr=True)
+    out = probe(_out(tmp_path, hdr=True, crf=35), "ffprobe")
+    assert out.color_transfer == "smpte2084"
+    bad_src = dataclasses.replace(src, color_primaries="bt709")
+    r = verify_output(bad_src, out.path, convert(), "ffmpeg", "ffprobe")
+    assert r.checks["tracks"] is False
+
+
+def test_eight_bit_output_for_hdr_source_fails_tracks(tmp_path, monkeypatch):
+    import shelfsaver.verify as v
+    src = _src(tmp_path, vcodec="libx265", hdr=True)
+    real = v.probe
+    monkeypatch.setattr(v, "probe", lambda p, f: dataclasses.replace(real(p, f), bit_depth=8))
+    r = verify_output(src, _out(tmp_path, hdr=True, crf=35), convert(), "ffmpeg", "ffprobe")
+    assert r.checks["tracks"] is False
 
 
 def test_unreadable_output_is_a_failed_result(tmp_path):

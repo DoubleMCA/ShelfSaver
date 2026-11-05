@@ -116,3 +116,25 @@ def test_zero_duration_is_an_error():
     data["format"]["duration"] = "0"
     with pytest.raises(ProbeError):
         parse_probe(data, "x.mkv", 1000)
+
+
+def test_stream_end_times_reports_each_stream_separately(tmp_path):
+    from shelfsaver.probe import stream_end_times
+    src = make_video(tmp_path / "a.mkv", seconds=4, size="320x240")
+    short = tmp_path / "b.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-t", "2", "-i", str(src),
+                    "-map", "0:v", "-map", "1:a", "-c", "copy", str(short)], check=True)
+    info = probe(short, "ffprobe")
+    ends = stream_end_times(short, "ffprobe")
+    video = next(s.index for s in info.streams if s.kind == "video")
+    aud = next(s.index for s in info.streams if s.kind == "audio")
+    assert ends[video] == pytest.approx(4.0, abs=0.1)
+    assert ends[aud] == pytest.approx(2.0, abs=0.1)
+
+
+def test_stream_end_times_rejects_garbage(tmp_path):
+    from shelfsaver.probe import stream_end_times
+    bad = tmp_path / "x.mkv"
+    bad.write_bytes(b"nope")
+    with pytest.raises(ProbeError):
+        stream_end_times(bad, "ffprobe")
