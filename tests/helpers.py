@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from shelfsaver.models import MediaInfo, Stream
+from shelfsaver.models import Decision, MediaInfo, Stream
 
 _cache_dir = None
 _cache: dict = {}
@@ -97,13 +97,15 @@ def _build(out, seconds, size, vcodec, crf, audio, subs, interlaced, hdr, cover_
         if vcodec == "libx264":
             args += ["-flags", "+ilme+ildct"]
     if vf:
-        args += ["-vf", ",".join(vf)]
+        args += ["-filter:v:0", ",".join(vf)]
     if hdr:
         args += ["-pix_fmt", "yuv420p10le"]
         if vcodec == "libx265":
             # Color tags must go in the bitstream; ffmpeg's own flags don't stick for x265.
             args += ["-x265-params",
-                     "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:log-level=error"]
+                     "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:"
+                     "master-display=G(13250,34500)B(7500,3000)R(34000,16000)"
+                     "WP(15635,16450)L(10000000,1):max-cll=1000,400:log-level=error"]
         else:
             args += ["-color_primaries", "bt2020", "-color_trc", "smpte2084",
                      "-colorspace", "bt2020nc"]
@@ -150,3 +152,15 @@ def audio(*tracks) -> tuple:
 
 def eng_spa() -> tuple:
     return audio(("eng", None, True), ("spa", None, False))
+
+
+def convert(**overrides) -> Decision:
+    fields = dict(action="convert", reason="Worth converting", remove_audio=(), why="")
+    fields.update(overrides)
+    return Decision(**fields)
+
+
+def strip(**overrides) -> Decision:
+    fields = dict(action="strip_only", reason="Remove extra audio", remove_audio=(), why="")
+    fields.update(overrides)
+    return Decision(**fields)
