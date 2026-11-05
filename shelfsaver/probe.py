@@ -185,7 +185,7 @@ def scan_streams(path, ffprobe, should_stop=lambda: False, strict=True) -> dict:
     should_stop() turns true.
     """
     cmd = [str(ffprobe), "-v", "error",
-           "-show_entries", "packet=stream_index,pts_time,duration_time",
+           "-show_entries", "packet=stream_index,pts_time,dts_time,duration_time",
            "-of", "csv=p=0", str(path)]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -214,12 +214,15 @@ def scan_streams(path, ffprobe, should_stop=lambda: False, strict=True) -> dict:
                     break
                 next_check = now + 0.2
             parts = raw.decode("utf-8", "replace").strip().split(",")
-            if len(parts) < 2:
+            if len(parts) < 3:
                 continue
-            index, pts = _int(parts[0]), _float(parts[1])
-            if index is None or pts is None:
+            # AVI stores no presentation time for video with B-frames, only the decode time.
+            index, when = _int(parts[0]), _float(parts[1])
+            if when is None:
+                when = _float(parts[2])
+            if index is None or when is None:
                 continue
-            times.setdefault(index, array("d")).append(pts)
+            times.setdefault(index, array("d")).append(when)
     finally:
         if proc.poll() is None:
             proc.terminate()

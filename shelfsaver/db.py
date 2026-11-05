@@ -204,11 +204,32 @@ class Database:
             (status, reason, time.time(), id),
         )
 
-    def next_queued(self) -> Optional[FileRow]:
+    def next_queued(self, skip_libraries: Iterable[int] = ()) -> Optional[FileRow]:
+        skip = list(skip_libraries)
+        not_in = f" AND library_id NOT IN ({','.join('?' * len(skip))})" if skip else ""
         rows = self._query(
-            "SELECT * FROM files WHERE status='queued' ORDER BY size DESC, id LIMIT 1"
+            f"SELECT * FROM files WHERE status='queued'{not_in} ORDER BY size DESC, id LIMIT 1",
+            skip,
         )
         return _file(rows[0]) if rows else None
+
+    def files_with_status(self, status: str) -> list[FileRow]:
+        return [_file(r) for r in self._query(
+            "SELECT * FROM files WHERE status=? ORDER BY id", (status,))]
+
+    def record_converted(
+        self, id: int, path: str, size: int, mtime: float, codec: Optional[str],
+        container: Optional[str], resolution: Optional[str],
+    ) -> None:
+        """Point a file's row at its new version. Any other row for that path is replaced."""
+        conn = self._conn()
+        with conn:
+            conn.execute("DELETE FROM files WHERE path=? AND id<>?", (path, id))
+            conn.execute(
+                "UPDATE files SET path=?, size=?, mtime=?, status='converted', reason=NULL,"
+                " codec=?, container=?, resolution=?, updated_at=? WHERE id=?",
+                (path, size, mtime, codec, container, resolution, time.time(), id),
+            )
 
     def requeue(self, ids: Iterable[int]) -> None:
         conn = self._conn()

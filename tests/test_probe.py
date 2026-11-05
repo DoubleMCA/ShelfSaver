@@ -134,6 +134,15 @@ def test_scan_streams_reports_each_stream_separately(tmp_path):
     assert spans[video].max_gap == pytest.approx(0.04, abs=0.01)
 
 
+def test_scan_streams_reads_avi_video_that_only_has_decode_times(tmp_path):
+    from shelfsaver.probe import scan_streams
+    path = make_video(tmp_path / "a.avi", seconds=2, size="320x240")  # H.264 with B-frames
+    video = next(s.index for s in probe(path, "ffprobe").streams if s.kind == "video")
+    spans = scan_streams(path, "ffprobe", strict=False)
+    assert spans[video].start == pytest.approx(0.0, abs=0.1)
+    assert spans[video].end == pytest.approx(2.0, abs=0.2)
+
+
 def test_scan_streams_rejects_garbage(tmp_path):
     from shelfsaver.probe import scan_streams
     bad = tmp_path / "x.mkv"

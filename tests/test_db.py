@@ -20,6 +20,30 @@ def test_next_queued_returns_largest_first(db, lib):
     assert db.next_queued().path == "b.mkv"
 
 
+def test_next_queued_can_skip_libraries(db, lib):
+    other = db.add_library("TV", "D:\\TV", "balanced", True)
+    db.upsert_file(lib.id, "a.mkv", 100, 1.0, "queued")
+    db.upsert_file(other.id, "b.mkv", 900, 1.0, "queued")
+    assert db.next_queued([other.id]).path == "a.mkv"
+    assert db.next_queued([lib.id, other.id]) is None
+
+
+def test_files_with_status(db, lib):
+    a = db.upsert_file(lib.id, "a.mkv", 100, 1.0, "working")
+    db.upsert_file(lib.id, "b.mkv", 100, 1.0, "queued")
+    assert [f.id for f in db.files_with_status("working")] == [a.id]
+
+
+def test_record_converted_moves_the_row_and_replaces_any_row_at_the_new_path(db, lib):
+    f = db.upsert_file(lib.id, "a.avi", 100, 1.0, "working", codec="h264")
+    stale = db.upsert_file(lib.id, "a.mkv", 5, 1.0, "missing")
+    db.record_converted(f.id, "a.mkv", 40, 2.0, "hevc", "mkv", "640x360")
+    row = db.get_file(f.id)
+    assert (row.path, row.size, row.mtime, row.status) == ("a.mkv", 40, 2.0, "converted")
+    assert (row.codec, row.container, row.resolution) == ("hevc", "mkv", "640x360")
+    assert db.get_file(stale.id) is None and db.get_file_by_path("a.avi") is None
+
+
 def test_stats_survive_library_removal(db, lib):
     f = db.upsert_file(lib.id, "a.mkv", 100, 1.0, "converted")
     r = db.start_run(f.id, 100, "H.264 MKV", 8_000_000, "why")
