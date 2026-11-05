@@ -98,3 +98,11 @@ class Decision:
     reason: str
     remove_audio: tuple = ()
     why: str = ""
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    passed: bool
+    checks: dict
+    reason: str = ""
+    not_worth_it: bool = False
