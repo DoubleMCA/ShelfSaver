@@ -26,8 +26,9 @@ networks only, and prints the web address (port 8642) at the end.
 Your settings, history and login live in `C:\ProgramData\ShelfSaver`. Only administrators
 can open that folder.
 
-To update, get the newer copy of this folder and run the same command again. The app is
-stopped, replaced and started again, and your data is left alone.
+To update, get the newer copy of this folder and run the same command again. The new version
+is built first, then swapped in; if anything goes wrong the old version is put back. Your data
+is left alone. Run setup from a folder outside `C:\Program Files\ShelfSaver`.
 
 ## Uninstall
 
@@ -43,11 +44,15 @@ libraries, holding folders and scratch disks are never touched.
 
 ## Compare quality before you commit
 
-To see Low, Medium and High on your own TV, make short clips from one of your files:
+To see Low, Medium and High on your own TV, make short clips from one of your files. The
+installer puts the tool at `C:\Program Files\ShelfSaver\scripts\make_compare_clips.py`. Run it from
+PowerShell as administrator, so it uses the same FFmpeg that ShelfSaver does:
 
 ```powershell
-.venv\Scripts\python scripts\make_compare_clips.py --source "D:\Media\Movies\Example.mkv" --start 600 --seconds 30 --out "D:\Clips"
+& "C:\Program Files\ShelfSaverenv\Scripts\python.exe" "C:\Program Files\ShelfSaver\scripts\make_compare_clips.py" --source "D:\Media\Movies\Example.mkv" --start 600 --seconds 30 --out "D:\Clips"
 ```
+
+(From a development copy of this folder, `scripts\make_compare_clips.py` works the same way.)
 
 This writes `Example Original.mkv`, `Example Low.mkv`, `Example Medium.mkv` and
 `Example High.mkv` into the output folder and prints how big each one is. The output folder

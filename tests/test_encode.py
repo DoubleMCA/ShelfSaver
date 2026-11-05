@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -185,3 +186,50 @@ def test_stop_terminates_ffmpeg():
     seen = []
     result = run_ffmpeg(cmd, 600, seen.append, lambda: bool(seen))
     assert result.stopped is True and result.returncode != 0
+
+
+_PARENT = r'''
+import subprocess, sys, time
+import shelfsaver.encode as enc
+
+pidfile = sys.argv[1]
+real = subprocess.Popen
+
+class Recording(real):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        open(pidfile, "w").write(str(self.pid))
+
+enc.subprocess.Popen = Recording
+cmd = ["ffmpeg", "-v", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25",
+       "-t", "600", "-f", "null", "-"]
+enc.run_ffmpeg(cmd, 600, lambda f: None, lambda: False)
+'''
+
+
+def _alive(pid):
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                         capture_output=True, text=True).stdout
+    return "ffmpeg" in out.lower()
+
+
+def test_ffmpeg_dies_when_the_app_is_killed(tmp_path):
+    import time
+    pidfile = tmp_path / "pid.txt"
+    parent = subprocess.Popen([sys.executable, "-c", _PARENT, str(pidfile)])
+    try:
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text():
+                break
+            time.sleep(0.1)
+        pid = int(pidfile.read_text())
+        time.sleep(1)
+        assert _alive(pid)
+        subprocess.run(["taskkill", "/PID", str(parent.pid), "/F"], capture_output=True)
+        for _ in range(100):
+            if not _alive(pid):
+                break
+            time.sleep(0.1)
+        assert not _alive(pid)
+    finally:
+        parent.kill()

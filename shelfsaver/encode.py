@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .jobobject import kill_with_app
 from .models import Decision, MediaInfo, Stream
 from .quality import LEVELS
 
@@ -124,6 +125,7 @@ def run_ffmpeg(cmd: list, duration: float, on_progress: Callable[[float], None],
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, creationflags=flags)
+    kill_with_app(proc)
     tail = bytearray()
     lock = threading.Lock()
 

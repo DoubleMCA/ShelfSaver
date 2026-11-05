@@ -25,14 +25,31 @@ def clip_name(name: str, level: str) -> str:
     return f"{name} {level.capitalize()}.mkv"
 
 
+def comparison_decision(info) -> Decision:
+    """Comparison is the point, so convert even if the app would normally leave this file alone."""
+    natural = decide(info, "medium", english_only=False)
+    if natural.action == "convert":
+        return natural
+    return Decision("convert", "Comparison clip", (), "Forced for comparison")
+
+
 def _is_inside(path: Path, folder: Path) -> bool:
     return path == folder or folder in path.parents
 
 
-def _cut(source: Path, start: float, seconds: float, dest: Path, ffmpeg: str) -> None:
-    """Stream-copy a section, so the Original clip is the source's own picture and sound."""
+def _cut(source: Path, start: float, seconds: float, dest: Path, ffmpeg: str,
+         ffprobe: str) -> None:
+    """Stream-copy a section, so the Original clip is the source's own picture and sound.
+
+    MP4 text subtitles (mov_text) can't be copied into MKV, so only in the clip they become srt.
+    """
+    subtitles = [s for s in probe(source, ffprobe).streams if s.kind == "subtitle"]
     cmd = [str(ffmpeg), "-y", "-v", "warning", "-ss", str(start), "-i", str(source),
-           "-t", str(seconds), "-map", "0", "-map", "-0:d", "-c", "copy", str(dest)]
+           "-t", str(seconds), "-map", "0", "-map", "-0:d", "-c", "copy"]
+    for n, sub in enumerate(subtitles):
+        if sub.codec == "mov_text":
+            cmd += [f"-c:s:{n}", "srt"]
+    cmd.append(str(dest))
     proc = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=600)
     if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
         raise RuntimeError("Could not cut a clip from the source: "
@@ -83,17 +100,14 @@ def main(argv=None) -> int:
         return 2
 
     try:
-        _cut(source, args.start, args.seconds, original, args.ffmpeg)
+        _cut(source, args.start, args.seconds, original, args.ffmpeg, args.ffprobe)
         info = probe(original, args.ffprobe)
     except (RuntimeError, ProbeError, OSError, subprocess.SubprocessError) as exc:
         original.unlink(missing_ok=True)
         print(exc, file=sys.stderr)
         return 1
 
-    # Comparison is the point, so convert even if the app would normally leave this file alone.
-    natural = decide(info, "medium", english_only=False)
-    decision = natural if natural.action == "convert" else Decision(
-        "convert", "Comparison clip", (), "Forced for comparison")
+    decision = comparison_decision(info)
 
     rows = [("Original", original.stat().st_size)]
     failed = False

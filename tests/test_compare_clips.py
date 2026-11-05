@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers import make_video
+from shelfsaver.probe import probe
+
+from tests.helpers import info, make_video
 
 _SPEC = importlib.util.spec_from_file_location(
     "make_compare_clips",
@@ -12,6 +14,12 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 clips = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(clips)
+
+
+@pytest.fixture(autouse=True)
+def _private_data_dir(tmp_path, monkeypatch):
+    # An installed PC has an admin-only data folder; tests must never depend on it.
+    monkeypatch.setenv("SHELFSAVER_DATA", str(tmp_path / "appdata"))
 
 
 def _digest(path):
@@ -53,3 +61,41 @@ def test_refuses_missing_source(tmp_path):
 def test_clip_names_come_from_level_names():
     assert clips.clip_name("Film", "original") == "Film Original.mkv"
     assert clips.clip_name("Film", "high") == "Film High.mkv"
+
+
+def test_decision_is_forced_to_convert_for_already_hevc():
+    decision = clips.comparison_decision(info(video_codec="hevc"))
+    assert decision.action == "convert" and decision.remove_audio == ()
+
+
+def test_decision_keeps_natural_convert():
+    assert clips.comparison_decision(info()).reason == "Worth converting"
+
+
+@pytest.mark.gpu
+def test_already_hevc_source_still_gets_all_levels(tmp_path):
+    src = make_video(tmp_path / "source" / "Modern.mkv", seconds=4, size="640x360",
+                     vcodec="libx265")
+    out = tmp_path / "clips"
+    assert clips.main(["--source", str(src), "--start", "0", "--seconds", "2",
+                       "--out", str(out)]) == 0
+    assert len(list(out.iterdir())) == 4
+
+
+def test_mov_text_subtitles_are_cut_into_the_clip_as_srt(tmp_path):
+    src = make_video(tmp_path / "source" / "Subbed.mp4", seconds=3, size="320x180",
+                     subs=[("eng", None)])
+    dest = tmp_path / "clips" / "Subbed Original.mkv"
+    dest.parent.mkdir()
+    clips._cut(src, 0, 2, dest, "ffmpeg", "ffprobe")
+    subs = [s for s in probe(dest, "ffprobe").streams if s.kind == "subtitle"]
+    assert [s.codec for s in subs] == ["subrip"]
+
+
+@pytest.mark.gpu
+def test_clips_made_from_mp4_with_text_subtitles(tmp_path):
+    src = make_video(tmp_path / "source" / "Subbed.mp4", seconds=3, size="320x180",
+                     subs=[("eng", None)])
+    out = tmp_path / "clips"
+    assert clips.main(["--source", str(src), "--start", "0", "--seconds", "2",
+                       "--out", str(out)]) == 0

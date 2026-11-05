@@ -27,14 +27,13 @@ def _default_data_dir() -> Path:
 def load_config() -> Config:
     cfg = Config(data_dir=_default_data_dir())
     path = cfg.data_dir / "config.json"
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = {}
-        if isinstance(data, dict):
-            for key in ("ffmpeg", "ffprobe"):
-                value = data.get(key)
-                if isinstance(value, str) and value:
-                    setattr(cfg, key, value)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        for key in ("ffmpeg", "ffprobe"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                setattr(cfg, key, value)
     return cfg
