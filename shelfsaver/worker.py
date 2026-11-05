@@ -42,7 +42,7 @@ from .swap import (
     recover_swap,
     work_root,
 )
-from .verify import verify_output
+from .verify import HDR_TRANSFERS, verify_output
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,7 @@ def _tracks_json(info: MediaInfo, decision: Decision) -> str:
     return json.dumps({
         "kept": [_stream_record(s) for s in info.streams if not is_removed(s)],
         "removed": [_stream_record(s) for s in info.streams if is_removed(s)],
+        "hdr": info.color_transfer in HDR_TRANSFERS,
     })
 
 

@@ -340,7 +340,7 @@
       var name = el('input', { type: 'text', id: 'lib-name', autocomplete: 'off' });
       var folder = el('input', { type: 'text', id: 'lib-path', autocomplete: 'off', class: 'mono' });
       var levels = levelPicker('level', 'medium');
-      var english = englishCheckbox(true);
+      var english = englishCheckbox(false);
       var error = el('p', { class: 'err', role: 'alert', hidden: true });
       var submit = el('button', { type: 'submit', class: 'primary', text: 'Add library' });
       var form = el('form', { novalidate: true },
@@ -493,7 +493,7 @@
       var run = runs.filter(function (r) { return r.id === row.id; })[0] || runs[0] || {};
       var grid = el('div', { class: 'grid' });
       var why = run.why || '';
-      var hdr = /HDR|Dolby Vision/i.test(why) ? ', HDR kept' : '';
+      var hdr = run.tracks && run.tracks.hdr ? ', HDR kept' : '';
       var pic = picture(file.resolution);
       if (pic) add(grid, [field('Picture', pic + hdr)]);
       if (row.was.bitrate || row.now.bitrate) {

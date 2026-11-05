@@ -23,7 +23,7 @@ from shelfsaver.encode import EncodeResult
 from shelfsaver.probe import probe
 from shelfsaver.swap import FileInUse, TargetExists, UnexpectedSwapState
 from shelfsaver.worker import GB, IN_USE_RETRY_SECONDS, TARGET_TAKEN, WAITING_IN_USE, Worker
-from tests.helpers import make_video
+from tests.helpers import convert, eng_spa, info, make_video
 
 SIZE = "640x360"
 LOTS_OF_ROOM = 10_000 * GB
@@ -1504,3 +1504,11 @@ def test_claim_takes_nothing_when_the_row_changed_after_it_was_picked(env, monke
     assert env.status() == "queued"
     assert env.encodes == 0
     assert env.db.file_details(row.id)["runs"] == []
+
+
+def test_tracks_record_whether_the_picture_is_hdr():
+    hdr = json.loads(worker_module._tracks_json(
+        info(color_transfer="smpte2084", streams=eng_spa()), convert()))
+    sdr = json.loads(worker_module._tracks_json(info(streams=eng_spa()), convert()))
+    assert hdr["hdr"] is True
+    assert sdr["hdr"] is False

@@ -421,6 +421,7 @@ def test_history_shape_has_was_now_saved(authed, parts, tmp_path):
     assert row["now"]["size"] == 500 and row["now"]["format"] == "x265"
     assert row["saved_bytes"] == 500 and row["status"] == "converted"
     assert "swap_json" not in row
+    assert "now_path" in row
     assert authed.get("/api/history", params={"library_id": lib.id + 1}).json() == []
     assert authed.get("/api/history", params={"limit": 0}).status_code == 400
 
@@ -989,3 +990,8 @@ def test_pages_need_no_internet():
     for page in STATIC.glob("*.html"):
         text = page.read_text(encoding="utf-8")
         assert "http://" not in text and "https://" not in text, page.name
+
+
+def test_add_library_dialog_starts_with_english_only_off():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "englishCheckbox(false)" in app_js and "englishCheckbox(true)" not in app_js
