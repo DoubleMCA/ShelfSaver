@@ -65,7 +65,9 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
-LIBRARY_FIELDS = {"name", "path", "level", "english_only", "status"}
+DEFAULT_SETTINGS = {"holding_enabled": "1"}
+
+LIBRARY_FIELDS ={"name", "path", "level", "english_only", "status"}
 RUN_FIELDS = {
     "state", "step", "started_at", "finished_at", "was_size", "now_size",
     "was_format", "now_format", "now_path", "was_bitrate", "now_bitrate", "why",
@@ -155,7 +157,11 @@ class Database:
     # settings
     def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         rows = self._query("SELECT value FROM settings WHERE key=?", (key,))
-        return rows[0]["value"] if rows else default
+        if rows:
+            return rows[0]["value"]
+        if default is None:
+            return DEFAULT_SETTINGS.get(key)
+        return default
 
     def set_setting(self, key: str, value: str) -> None:
         self._exec(

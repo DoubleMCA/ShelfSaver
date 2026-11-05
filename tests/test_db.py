@@ -88,3 +88,10 @@ def test_config_env_and_overrides(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text('{"ffmpeg": "x/ff.exe"}', encoding="utf-8")
     cfg = load_config()
     assert cfg.data_dir == tmp_path and cfg.ffmpeg == "x/ff.exe" and cfg.ffprobe == "ffprobe"
+
+
+def test_holding_enabled_defaults_on_until_set(db):
+    assert db.get_setting("holding_enabled") == "1"
+    db.set_setting("holding_enabled", "0")
+    assert db.get_setting("holding_enabled") == "0"
+    assert db.get_setting("scratch_dir") is None
