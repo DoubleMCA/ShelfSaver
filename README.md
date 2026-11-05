@@ -7,6 +7,17 @@ original, and it never removes anything you did not agree to.
 
 It runs on one Windows 11 PC with an NVIDIA graphics card, and you use it from a web page.
 
+## What it does
+
+- Treats each folder you add as a library, and picks up new files as they arrive.
+- Decides for each video whether converting it is worthwhile, and skips the rest.
+- Has one setting for how hard to compress: Low, Medium or High.
+- Shows each library's space saved, plus every file's old and new size and format.
+- Builds new files on a scratch disk you choose, and swaps them in once they pass the checks.
+- Can keep replaced originals in a holding folder until you clear them.
+- Can remove non-English soundtracks, except on dubbed movies. This is off unless you turn it on.
+- Offers logs and status over a read-only MCP connection.
+
 ## Install
 
 You need Windows 11, an NVIDIA graphics card and an internet connection.
@@ -55,11 +66,10 @@ Stop-ScheduledTask -TaskName ShelfSaver
 
 To turn it back on: `Enable-ScheduledTask -TaskName ShelfSaver` then `Start-ScheduledTask -TaskName ShelfSaver`.
 
-## Compare quality before you commit
+## Compare Low, Medium and High
 
-To see Low, Medium and High on your own TV, make short clips from one of your files. The
-installer puts the tool at `C:\Program Files\ShelfSaver\scripts\make_compare_clips.py`. Run it from
-PowerShell as administrator, so it uses the same FFmpeg that ShelfSaver does:
+This tool makes short clips from one of your files at each setting. The installer puts it at
+`C:\Program Files\ShelfSaver\scripts\make_compare_clips.py`. Run it from PowerShell as administrator:
 
 ```powershell
 & "C:\Program Files\ShelfSaver\venv\Scripts\python.exe" "C:\Program Files\ShelfSaver\scripts\make_compare_clips.py" --source "D:\Media\Movies\Example.mkv" --start 600 --seconds 30 --out "D:\Clips"
