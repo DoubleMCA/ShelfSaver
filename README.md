@@ -31,8 +31,8 @@ You need Windows 11, an NVIDIA graphics card and an internet connection.
    ```
 
 The script installs Python and FFmpeg if they are missing, puts the program in
-`C:\Program Files\ShelfSaver`, sets it to start with the PC, opens its port on Private
-networks only, and prints the web address (port 8642) at the end.
+`C:\Program Files\ShelfSaver`, sets it to start with the PC, opens its port on all
+networks (Private, Public and Domain), and prints the web address (port 8642) at the end.
 
 Your settings, history and login live in `C:\ProgramData\ShelfSaver`. Only administrators
 can open that folder.

@@ -63,3 +63,9 @@ def test_ffmpeg_that_reports_failure_is_not_trusted(tmp_path):
 def test_setup_stops_with_a_plain_message_when_no_ffmpeg_can_encode():
     text = SCRIPT.read_text(encoding="utf-8")
     assert "can't convert video on the NVIDIA graphics card" in text
+
+
+def test_setup_opens_the_port_on_every_network_type():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "-LocalPort $Port -Profile Any" in text
+    assert "Private" not in text

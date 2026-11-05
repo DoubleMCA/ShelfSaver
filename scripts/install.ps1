@@ -492,13 +492,13 @@ try {
         -Settings $settings -Description 'ShelfSaver: converts video libraries to save space.' -Force | Out-Null
     Say 'Done.'
 
-    Step 'Allowing access from your home network'
+    Step 'Allowing access from other devices'
     if (Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue) {
         Remove-NetFirewallRule -DisplayName $RuleName
     }
     New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Protocol TCP `
-        -LocalPort $Port -Profile Private | Out-Null
-    Say "Port $Port is open on Private networks only."
+        -LocalPort $Port -Profile Any | Out-Null
+    Say "Port $Port is open on all networks."
 
     Step 'Starting ShelfSaver'
     Start-ScheduledTask -TaskName $TaskName
@@ -567,6 +567,6 @@ Say 'Open ShelfSaver in a web browser:'
 Say "  On this PC:        http://localhost:$Port"
 if ($ip) { Say "  From another device: http://${ip}:$Port" }
 Say ''
-Say "If the other device can't connect, make sure this PC's network is set to 'Private' in Windows settings."
+Say "If the other device can't connect, check that nothing else on this PC is blocking port $Port."
 Say "Your settings and history live in $DataDir and are kept when you update or uninstall."
 Say "The comparison-clip tool is installed at $AppDir\scripts\make_compare_clips.py"
