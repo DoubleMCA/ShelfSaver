@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import threading
@@ -31,6 +32,7 @@ from .swap import (
     TargetExists,
     UnexpectedSwapState,
     _may_be_a_link,
+    _present,
     _target_taken as target_is_taken,
     execute_swap,
     ext_path,
@@ -79,6 +81,8 @@ _FORMAT_NAMES = {
     "mpeg4": "MPEG-4", "msmpeg4v3": "DivX", "vc1": "VC-1", "wmv3": "WMV", "av1": "AV1",
     "vp8": "VP8", "vp9": "VP9",
 }
+
+_TEMP_STEM = re.compile(r"[0-9]{1,18}-[0-9]{1,18}")
 
 _now = time.monotonic
 
@@ -130,10 +134,17 @@ class _SourceLocked(Exception):
     be mistaken for trouble with the destination."""
 
 
+def _temp_stem(run_id: int, started_at: float) -> str:
+    """The name of a run's temp file. A run ID alone can come round again if the database is
+    ever replaced, while a kept temp from before that still needs protecting."""
+    return f"{run_id}-{int(started_at * 1000)}"
+
+
 def _is_locked(path) -> bool:
-    """True if another program won't let this file be opened for reading right now."""
+    """True if another program won't let this file be read right now."""
     try:
-        with open(ext_path(path), "rb"):
+        with open(ext_path(path), "rb") as reader:
+            reader.read(4096)  # a lock on part of a file only shows up when reading it
             return False
     except PermissionError:
         return True
@@ -143,27 +154,32 @@ def _is_locked(path) -> bool:
 
 def _copy_file(source, target, on_fraction: Callable[[float], None],
                should_stop: Callable[[], bool]) -> None:
-    """Copy contents only, so a read-only flag can't follow the file, and commit them to disk."""
-    try:
-        reader = open(ext_path(source), "rb")
-    except PermissionError as exc:
-        raise _SourceLocked(str(exc)) from exc
-    done = 0
-    with reader, open(ext_path(target), "wb") as writer:
-        total = os.fstat(reader.fileno()).st_size
-        while True:
-            try:
-                chunk = reader.read(COPY_CHUNK_BYTES)
-            except PermissionError as exc:
-                raise _SourceLocked(str(exc)) from exc
-            if not chunk:
-                break
-            if should_stop():
-                raise _Stopped()
-            writer.write(chunk)
-            done += len(chunk)
-            if total:
-                on_fraction(min(1.0, done / total))
+    """Copy contents only, so a read-only flag can't follow the file, and commit them to disk.
+
+    Raises `FileExistsError` rather than ever writing over something at `target`. Whenever this
+    raises anything else, whatever is at `target` was created here.
+    """
+    with open(ext_path(target), "xb") as writer:
+        try:
+            reader = open(ext_path(source), "rb")
+        except PermissionError as exc:
+            raise _SourceLocked(str(exc)) from exc
+        done = 0
+        with reader:
+            total = os.fstat(reader.fileno()).st_size
+            while True:
+                try:
+                    chunk = reader.read(COPY_CHUNK_BYTES)
+                except PermissionError as exc:
+                    raise _SourceLocked(str(exc)) from exc
+                if not chunk:
+                    break
+                if should_stop():
+                    raise _Stopped()
+                writer.write(chunk)
+                done += len(chunk)
+                if total:
+                    on_fraction(min(1.0, done / total))
         writer.flush()
         os.fsync(writer.fileno())
 
@@ -512,8 +528,10 @@ class Worker:
 
     @staticmethod
     def _delete_temp(path) -> None:
-        if Path(path).parent.name.lower() != "incoming":
-            logger.error("Refusing to delete %s, because it isn't in an incoming folder", path)
+        folder = Path(path).parent
+        if (folder.name.lower() != "incoming"
+                or folder.parent.name.lower() != "shelfsaver"):
+            logger.error("Refusing to delete %s, because it isn't in ShelfSaver\\incoming", path)
             return
         try:
             os.unlink(ext_path(path))
@@ -608,8 +626,12 @@ class Worker:
         return self._place_new_file(job)
 
     def _encoder_failed(self, job: _Job, result: EncodeResult) -> None:
-        logger.error("FFmpeg exited with %s on %s\n%s", result.returncode, job.file.path,
-                     result.log_tail)
+        if result.returncode == 0:
+            logger.error("FFmpeg finished %s, but its result can't be read\n%s", job.file.path,
+                         result.log_tail)
+        else:
+            logger.error("FFmpeg exited with %s on %s\n%s", result.returncode, job.file.path,
+                         result.log_tail)
         self._fail_run(job, CONVERT_FAILED)
         with self._lock:
             self._failed_encodes.append(job.file.id)
@@ -640,12 +662,17 @@ class Worker:
 
         self._begin_step(job, "Replacing")
         incoming = work_root(job.library.path) / "incoming"
-        job.temp = incoming / f"{job.run.id}{job.output.suffix}"
+        temp = incoming / f"{_temp_stem(job.run.id, job.run.started_at)}{job.output.suffix}"
+        job.temp = temp
         try:
             os.makedirs(ext_path(incoming), exist_ok=True)
-            _copy_file(job.output, job.temp, self._on_progress, self._should_stop)
+            _copy_file(job.output, temp, self._on_progress, self._should_stop)
             same = (_sha256(job.output, self._should_stop)
-                    == _sha256(job.temp, self._should_stop))
+                    == _sha256(temp, self._should_stop))
+        except FileExistsError as exc:
+            job.temp = None  # not ours, so no clean-up may touch it
+            logger.error("%s already exists, and may be the only copy of a new file", temp)
+            raise _RunFailed("Couldn't copy the new file to the library drive") from exc
         except OSError as exc:
             logger.error("Could not copy the new file for %s: %s", job.file.path, exc)
             raise _RunFailed("Couldn't copy the new file to the library drive") from exc
@@ -828,15 +855,23 @@ class Worker:
             except Exception:
                 logger.exception("Could not recover run %s", run.id)
 
+        undecided = set()
         for run in self.db.active_runs(("running",)):
-            if self._looks_mid_swap(run):
+            try:
+                mid_swap = self._looks_mid_swap(run)
+            except OSError as exc:
+                logger.error("Leaving run %s until the next start, because the disk can't say "
+                             "whether it began replacing its file: %s", run.id, exc)
+                undecided.add(run.file_id)
+                continue
+            if mid_swap:
                 self._keep_swapping(run.id, run.file_id, "an original that is gone while its "
                                     "new file is still waiting", SWAP_RECORD_LOST)
             else:
                 self._end_run(run.id, "interrupted", INTERRUPTED_NOTE)
-        still_swapping = {r.file_id for r in self.db.active_runs(SWAP_STATES)}
+        leave_alone = undecided | {r.file_id for r in self.db.active_runs(SWAP_STATES)}
         working = [f.id for f in self.db.files_with_status("working")
-                   if f.id not in still_swapping]
+                   if f.id not in leave_alone]
         if working:
             logger.info("Starting %s interrupted files again", len(working))
             self.db.requeue(working)
@@ -851,17 +886,22 @@ class Worker:
         With its original gone and its temp file there, the temp can be the only new copy and
         the original can be in the holding folder. Nothing proves which files are which without
         the plan, so they are left for the owner. Keeping the run in `swapping` also stops the
-        holding folder being cleared.
+        holding folder being cleared. Raises `OSError` if the disk can't say, including when
+        the whole volume is gone.
         """
         record = self.db.run_record(run.id)
         original = record and record["file_path"]
-        if not original or os.path.lexists(ext_path(original)):
+        if not original or _present(original):
             return False
+        work = work_root(original)
+        if not _present(work.parent):
+            raise OSError(f"The volume holding {original} can't be reached")
         try:
-            found = _list_folder(work_root(original) / "incoming")
-        except OSError:
+            found = _list_folder(work / "incoming")
+        except FileNotFoundError:
             return False
-        return any(Path(entry.name).stem == str(run.id) for entry in found)
+        stem = _temp_stem(run.id, run.started_at)
+        return any(Path(entry.name).stem == stem for entry in found)
 
     def _delete_leftover_run_folders(self) -> None:
         setting = self.db.get_setting("scratch_dir")
@@ -927,12 +967,16 @@ class Worker:
         return ids
 
     def _is_clear_orphan(self, path: str, planned: set[int]) -> bool:
-        """True only if no plan names this file, and the run its name points to has ended with
-        its original still in place. `lexists` reads any disk error as absent, which keeps it."""
+        """True only if no plan names this file, and its whole name matches one run instance
+        that has ended with its original still in place. `lexists` reads any disk error as
+        absent, which keeps it."""
         if os.lstat(ext_path(path)).st_ino in planned:
             return False
         stem = Path(path).stem
-        record = self.db.run_record(int(stem)) if stem.isdecimal() else None
-        if record is None or record["state"] in ("running", *SWAP_STATES):
+        if not _TEMP_STEM.fullmatch(stem):
+            return False
+        record = self.db.run_record(int(stem.split("-")[0]))
+        if (record is None or record["state"] in ("running", *SWAP_STATES)
+                or _temp_stem(record["id"], record["started_at"]) != stem):
             return False
         return bool(record["file_path"]) and os.path.lexists(ext_path(record["file_path"]))

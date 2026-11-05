@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import json
 import logging
+import msvcrt
 import os
 import shutil
 import threading
@@ -31,6 +32,12 @@ BREAKER_MESSAGE = "Paused: conversions keep failing. Check the graphics card and
 
 class SimulatedCrash(Exception):
     """Not an OSError, so nothing can mistake it for an ordinary disk failure."""
+
+
+def temp_name(run, ext=".mkv"):
+    """The temp file name of a run, from either kind of record the database returns."""
+    fields = run if isinstance(run, dict) else vars(run)
+    return worker_module._temp_stem(fields["id"], fields["started_at"]) + ext
 
 
 def source_video(path, **kw):
@@ -453,6 +460,20 @@ def test_clean_exit_with_an_unreadable_result_counts_as_an_encoder_failure(env):
     assert all(env.db.get_file(i).status == "queued" for i in env.ids)
 
 
+def test_unreadable_result_is_not_logged_as_a_bad_exit(env, caplog):
+    def garbage(cmd, duration, on_progress, should_stop):
+        Path(cmd[-1]).write_bytes(b"not a video")
+        return EncodeResult(0, False, "looked fine")
+
+    env.use_encode(garbage)
+    env.queue_video()
+    with caplog.at_level(logging.ERROR, logger="shelfsaver.worker"):
+        env.worker.process_one()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("can't be read" in m and "looked fine" in m for m in messages)
+    assert not any("exited with" in m for m in messages)
+
+
 def test_an_encoder_failure_alone_fails_just_that_file(env):
     env.queue_video()
     env.fail_encodes()
@@ -538,7 +559,7 @@ def test_in_use_waits_then_finishes_on_retry(env, monkeypatch):
         row, run = env.file(), env.run_row()
         assert (row.status, row.reason) == ("waiting_in_use", "Waiting, file is in use")
         assert run["state"] == "waiting_in_use"
-        assert env.incoming_files() == [f"{run['id']}.mkv"]
+        assert env.incoming_files() == [temp_name(run)]
         assert env.scratch_runs() == []
         assert env.lib_file.read_bytes() == env.original_bytes
 
@@ -729,7 +750,7 @@ def test_swap_trouble_keeps_temp_and_can_finish_on_retry(env, monkeypatch, caplo
         env.worker.process_one()
     row, run = env.file(), env.run_row()
     assert run["state"] == "swapping"
-    assert env.incoming_files() == [f"{run['id']}.mkv"]
+    assert env.incoming_files() == [temp_name(run)]
     assert row.status == "failed" and row.reason and "no match" not in row.reason
     assert any(r.levelno == logging.ERROR for r in caplog.records)
     assert env.lib_file.read_bytes() == env.original_bytes
@@ -808,7 +829,7 @@ def test_target_exists_keeps_temp_when_the_original_is_not_where_it_was(env, mon
     env.worker.process_one()
     run = env.run_row()
     assert run["state"] == "swapping"
-    assert env.incoming_files() == [f"{run['id']}.mkv"]
+    assert env.incoming_files() == [temp_name(run)]
 
 
 def test_unexpected_crash_during_swap_keeps_everything_for_recovery(env, monkeypatch):
@@ -1131,7 +1152,7 @@ def test_recover_requeues_working_and_cleans_only_run_folders(env):
     env.db.set_file_status(rowless.id, "working")
 
     env.incoming.mkdir(parents=True)
-    partial = env.incoming / f"{run.id}.mkv"
+    partial = env.incoming / temp_name(run)
     partial.write_bytes(b"half copied")
     orphan = env.incoming / "999.mkv"
     orphan.write_bytes(b"orphan")
@@ -1170,7 +1191,7 @@ def test_power_cut_that_loses_the_swap_record_deletes_nothing(env, monkeypatch, 
     run = env.run_row()
     env.db.update_run(run["id"], state="running", swap_json=None, now_path=None, error=None)
     env.db.set_file_status(f.id, "working")
-    temp = env.incoming / f"{run['id']}.mkv"
+    temp = env.incoming / temp_name(run)
     new_bytes = temp.read_bytes()
     assert not env.lib_file.exists()
 
@@ -1206,14 +1227,14 @@ def ended_run(env, f, state="interrupted", **fields):
 
 def test_recover_removes_a_temp_of_an_ended_run_whose_original_is_there(env):
     f = env.queue_video()
-    temp = write_incoming(env, f"{ended_run(env, f).id}.mkv")
+    temp = write_incoming(env, temp_name(ended_run(env, f)))
     env.worker.recover()
     assert not temp.exists()
 
 
 def test_recover_keeps_a_temp_of_an_ended_run_whose_original_is_gone(env, caplog):
     f = env.queue_video()
-    temp = write_incoming(env, f"{ended_run(env, f).id}.mkv")
+    temp = write_incoming(env, temp_name(ended_run(env, f)))
     env.lib_file.unlink()
     with caplog.at_level(logging.ERROR, logger="shelfsaver.worker"):
         env.worker.recover()
@@ -1237,7 +1258,7 @@ def test_recover_keeps_a_temp_that_any_plan_names_by_file_id(env):
                 expected_size=4, temp_file_id=os.lstat(temp).st_ino,
                 original_size=f.size, original_mtime=f.mtime)
     run = ended_run(env, f, state="failed", swap_json=json.dumps(plan))
-    numbered = env.incoming / f"{run.id}.mkv"
+    numbered = env.incoming / temp_name(run)
     os.replace(temp, numbered)  # the run is known and its original is there, yet a plan names it
     env.worker.recover()
     assert numbered.exists()
@@ -1248,6 +1269,170 @@ def test_delete_temp_refuses_anything_outside_incoming(env):
     precious.write_bytes(b"keep")
     env.worker._delete_temp(precious)
     assert precious.read_bytes() == b"keep"
+
+
+def test_delete_temp_refuses_an_incoming_folder_outside_shelfsaver(env):
+    folder = env.lib / "incoming"
+    folder.mkdir()
+    precious = folder / "precious.mkv"
+    precious.write_bytes(b"keep")
+    env.worker._delete_temp(precious)
+    assert precious.read_bytes() == b"keep"
+
+
+def strand_a_temp(env, monkeypatch):
+    """Same name with holding: the original is held, and temp is the only new copy."""
+    real_last_step = swap._last_step
+
+    def crash(plan):
+        raise SimulatedCrash("power cut between the two renames")
+
+    monkeypatch.setattr(swap, "_last_step", crash)
+    env.queue_video()
+    env.worker.process_one()
+    monkeypatch.setattr(swap, "_last_step", real_last_step)
+    temp = env.incoming / temp_name(env.run_row())
+    assert temp.exists() and not env.lib_file.exists()
+    return temp, temp.read_bytes()
+
+
+def reset_database(env):
+    """The database was replaced, so run IDs start again from 1."""
+    env.db = Database(env.tmp_path / "data" / "fresh.db")
+    env.db.set_setting("scratch_dir", str(env.scratch))
+    env.library = env.db.add_library("Movies", str(env.lib), "high", False)
+    env.worker = Worker(env.db, env.config)
+    env.ids = []
+
+
+def test_new_run_after_a_database_reset_leaves_a_kept_temp_alone(env, monkeypatch):
+    temp, new_bytes = strand_a_temp(env, monkeypatch)
+    old_run_id = env.run_row()["id"]
+    reset_database(env)
+    env.worker.recover()
+    assert temp.read_bytes() == new_bytes
+
+    env.queue(source_video(env.lib / "other.mkv"))
+    env.worker.process_one()
+    assert env.run_row()["id"] == old_run_id  # the same ID really did come round again
+    assert env.status() == "converted"
+    assert temp.read_bytes() == new_bytes
+    assert env.held("movie.mkv").read_bytes() != b""
+
+
+def test_a_name_collision_fails_the_run_and_overwrites_nothing(env):
+    def someone_took_the_name(cmd, duration, on_progress, should_stop):
+        env.incoming.mkdir(parents=True, exist_ok=True)
+        (env.incoming / temp_name(env.run_row())).write_bytes(b"kept")
+        return env._fake_encode(cmd, duration, on_progress, should_stop)
+
+    env.use_encode(someone_took_the_name)
+    env.queue_video()
+    env.worker.process_one()
+    assert env.status() == "failed" and env.run_row()["state"] == "failed"
+    assert (env.incoming / temp_name(env.run_row())).read_bytes() == b"kept"
+    assert env.lib_file.read_bytes() == env.original_bytes
+
+
+def test_reused_run_id_does_not_make_a_kept_temp_an_orphan(env, monkeypatch):
+    temp, new_bytes = strand_a_temp(env, monkeypatch)
+    old_run_id = env.run_row()["id"]
+    reset_database(env)
+    other = env.queue(source_video(env.lib / "other.mkv"))
+    run = env.db.start_run(other.id, other.size, "H.264", None, "why")
+    env.db.update_run(run.id, state="interrupted")
+    assert run.id == old_run_id
+    env.worker.recover()
+    assert temp.read_bytes() == new_bytes
+
+
+def test_a_temp_named_with_only_the_run_id_is_kept(env):
+    f = env.queue_video()
+    temp = write_incoming(env, f"{ended_run(env, f).id}.mkv")
+    env.worker.recover()
+    assert temp.exists()
+
+
+@pytest.mark.parametrize("name", [
+    "9" * 30 + ".mkv", "9" * 30 + "-" + "9" * 30 + ".mkv", "-1-2.mkv", "1-.mkv", "1-2-3.mkv",
+    "\u0663-\u0663.mkv", ".mkv",
+])
+def test_recover_keeps_oddly_named_incoming_files(env, name):
+    temp = write_incoming(env, name)
+    env.worker.recover()
+    assert temp.exists()
+
+
+def lose_the_swap_record(env):
+    run = env.run_row()
+    env.db.update_run(run["id"], state="running", swap_json=None, now_path=None, error=None)
+    env.db.set_file_status(env.ids[0], "working")
+
+
+def test_disk_error_listing_incoming_keeps_the_run_as_it_is(env, monkeypatch, caplog):
+    temp, new_bytes = strand_a_temp(env, monkeypatch)
+    lose_the_swap_record(env)
+    real_list = worker_module._list_folder
+
+    def not_ready(path):
+        raise OSError(21, "device not ready")
+
+    monkeypatch.setattr(worker_module, "_list_folder", not_ready)
+    with caplog.at_level(logging.ERROR, logger="shelfsaver.worker"):
+        env.restarted_worker().recover()
+    assert env.run_row()["state"] == "running" and env.status() == "working"
+    assert temp.read_bytes() == new_bytes
+    assert any("can't say" in r.getMessage() for r in caplog.records)
+    assert env.worker.process_one() is False
+
+    monkeypatch.setattr(worker_module, "_list_folder", real_list)
+    env.restarted_worker().recover()
+    assert env.run_row()["state"] == "swapping" and env.status() == "failed"
+    assert temp.read_bytes() == new_bytes
+
+
+def test_disk_error_checking_the_original_keeps_the_run_as_it_is(env, monkeypatch):
+    temp, new_bytes = strand_a_temp(env, monkeypatch)
+    lose_the_swap_record(env)
+
+    def not_ready(path):
+        raise OSError(21, "device not ready")
+
+    monkeypatch.setattr(worker_module, "_present", not_ready)
+    env.restarted_worker().recover()
+    assert env.run_row()["state"] == "running" and env.status() == "working"
+    assert temp.read_bytes() == new_bytes
+
+
+def test_volume_that_is_gone_keeps_the_run_as_it_is(env, monkeypatch):
+    env.queue_video()
+    env.crash_before_swap()
+    lose_the_swap_record(env)
+    env.lib_file.unlink()
+    monkeypatch.setattr(swap, "_volume_root", lambda path: str(env.tmp_path / "unplugged"))
+    env.restarted_worker().recover()
+    assert env.run_row()["state"] == "running" and env.status() == "working"
+
+
+def test_no_incoming_folder_means_an_ordinary_interruption(env):
+    f = env.queue_video()
+    env.db.start_run(f.id, f.size, "H.264", None, "why")
+    env.db.set_file_status(f.id, "working")
+    env.lib_file.unlink()
+    env.worker.recover()
+    assert env.run_row()["state"] == "interrupted" and env.status() == "queued"
+
+
+def test_part_of_the_original_locked_waits_instead_of_failing(env):
+    f = env.queue_video()
+    with open(env.lib_file, "r+b") as holder:
+        msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 4096)
+        try:
+            env.worker.process_one()
+            assert env.status(f.id) == "waiting_in_use"
+        finally:
+            holder.seek(0)
+            msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 4096)
 
 
 def test_recover_with_no_scratch_set_still_works(env):
