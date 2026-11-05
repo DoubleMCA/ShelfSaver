@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from .models import Decision, MediaInfo, VerifyResult
-from .probe import ProbeError, ScanStopped, probe, stream_end_times
+from .probe import ProbeError, ScanStopped, probe, scan_streams
 from .quality import MIN_SAVINGS
 
 CHECKS = ("length", "tracks", "smaller", "plays")
@@ -30,11 +30,6 @@ def _language(stream) -> str:
 
 def _transfer(value):
     return None if value in (None, "", "unknown") else value
-
-
-def _length_ok(source: MediaInfo, output: MediaInfo) -> bool:
-    allowed = max(1.0, 0.002 * source.duration)
-    return abs(source.duration - output.duration) <= allowed
 
 
 def _tracks_ok(source: MediaInfo, output: MediaInfo, decision: Decision) -> bool:
@@ -86,22 +81,34 @@ def _kept_pairs(source: MediaInfo, output: MediaInfo, decision: Decision):
 
 def _stream_lengths_ok(source: MediaInfo, output: MediaInfo, out_path, decision,
                        ffprobe, should_stop):
-    """True/False, or None when stopped."""
+    """True/False, or None when stopped.
+
+    Each kept stream must start and end where its source stream does (both measured
+    from the earliest packet of the kept streams, so a source that starts at a
+    non-zero time is fine) and must not have a bigger hole between packets.
+    """
     pairs = _kept_pairs(source, output, decision)
     if pairs is None:
         return False
     try:
-        src_ends = stream_end_times(source.path, ffprobe, should_stop)
-        out_ends = stream_end_times(out_path, ffprobe, should_stop)
+        src = scan_streams(source.path, ffprobe, should_stop, strict=False)
+        out = scan_streams(out_path, ffprobe, should_stop, strict=True)
     except ScanStopped:
         return None
     except ProbeError:
         return False
+    if any(s not in src or o not in out for s, o in pairs):
+        return False
     allowed = max(1.0, 0.002 * source.duration)
+    src_origin = min(src[s].start for s, _ in pairs)
+    out_origin = min(out[o].start for _, o in pairs)
     for s_idx, o_idx in pairs:
-        if s_idx not in src_ends or o_idx not in out_ends:
+        s, o = src[s_idx], out[o_idx]
+        if abs((s.start - src_origin) - (o.start - out_origin)) > allowed:
             return False
-        if abs(src_ends[s_idx] - out_ends[o_idx]) > allowed:
+        if abs((s.end - src_origin) - (o.end - out_origin)) > allowed:
+            return False
+        if o.max_gap > s.max_gap + allowed:
             return False
     return True
 
@@ -132,9 +139,11 @@ def _plays(output: Path, video_index: int, ffmpeg, should_stop: Callable[[], boo
     reader.start()
     stopped = False
     try:
-        while proc.poll() is None:
+        while True:
             if should_stop():
                 stopped = True
+                break
+            if proc.poll() is not None:
                 break
             time.sleep(STOP_POLL_SECONDS)
     finally:
@@ -160,22 +169,23 @@ def verify_output(source: MediaInfo, output, decision: Decision, ffmpeg, ffprobe
     except ProbeError:
         return VerifyResult(False, checks, "New file could not be read")
 
-    checks["length"] = _length_ok(source, out)
     checks["tracks"] = _tracks_ok(source, out, decision)
     checks["smaller"] = _smaller_ok(source, out)
 
-    cheap_failed = [n for n in CHECKS[:3] if not checks[n]]
-    if cheap_failed:
-        if cheap_failed == ["smaller"]:
-            return VerifyResult(False, checks, REASONS["smaller"], not_worth_it=True)
-        return VerifyResult(False, checks, REASONS[cheap_failed[0]])
+    # Container duration is unreliable (a source that starts at a non-zero time reports
+    # a longer duration), so length is judged from per-stream packet timing. It runs
+    # even when the file is too big, so a truncated file is never excused as "not worth it".
+    if checks["tracks"]:
+        lengths = _stream_lengths_ok(source, out, output, decision, ffprobe, should_stop)
+        if lengths is None:
+            return VerifyResult(False, checks, "Stopped")
+        checks["length"] = lengths
 
-    lengths = _stream_lengths_ok(source, out, output, decision, ffprobe, should_stop)
-    if lengths is None:
-        return VerifyResult(False, checks, "Stopped")
-    if not lengths:
-        checks["length"] = False
-        return VerifyResult(False, checks, REASONS["length"])
+    for name in ("tracks", "length"):
+        if not checks[name]:
+            return VerifyResult(False, checks, REASONS[name])
+    if not checks["smaller"]:
+        return VerifyResult(False, checks, REASONS["smaller"], not_worth_it=True)
 
     video = _main_video(out)
     result = _plays(Path(output), video.index, ffmpeg, should_stop)

@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
+from array import array
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import MediaInfo, Stream
@@ -166,12 +169,23 @@ class ScanStopped(Exception):
     """A packet scan was interrupted by a stop request."""
 
 
-def stream_end_times(path, ffprobe, should_stop=lambda: False) -> dict:
-    """Latest packet end time (seconds) for every stream, keyed by stream index.
+@dataclass(frozen=True)
+class StreamSpan:
+    """When a stream's packets begin and end, and its largest gap between packets."""
+    start: float
+    end: float
+    max_gap: float
 
-    Raises ProbeError if the scan fails and ScanStopped if should_stop() turns true.
+
+def scan_streams(path, ffprobe, should_stop=lambda: False, strict=True) -> dict:
+    """Packet timing for every stream, keyed by stream index.
+
+    strict=True fails on any ffprobe error output or non-zero exit (ProbeError);
+    strict=False accepts whatever packets could be read. Raises ScanStopped if
+    should_stop() turns true.
     """
-    cmd = [str(ffprobe), "-v", "error", "-show_entries", "packet=stream_index,pts_time,duration_time",
+    cmd = [str(ffprobe), "-v", "error",
+           "-show_entries", "packet=stream_index,pts_time,duration_time",
            "-of", "csv=p=0", str(path)]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -188,23 +202,24 @@ def stream_end_times(path, ffprobe, should_stop=lambda: False) -> dict:
 
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
-    ends: dict = {}
+    times: dict = {}
     stopped = False
+    next_check = 0.0
     try:
-        for n, raw in enumerate(proc.stdout):
-            if n % 2000 == 0 and should_stop():
-                stopped = True
-                break
+        for raw in proc.stdout:
+            now = time.monotonic()
+            if now >= next_check:
+                if should_stop():
+                    stopped = True
+                    break
+                next_check = now + 0.2
             parts = raw.decode("utf-8", "replace").strip().split(",")
             if len(parts) < 2:
                 continue
             index, pts = _int(parts[0]), _float(parts[1])
             if index is None or pts is None:
                 continue
-            dur = _float(parts[2]) if len(parts) > 2 else None
-            end = pts + (dur or 0.0)
-            if end > ends.get(index, float("-inf")):
-                ends[index] = end
+            times.setdefault(index, array("d")).append(pts)
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -218,6 +233,11 @@ def stream_end_times(path, ffprobe, should_stop=lambda: False) -> dict:
         proc.stderr.close()
     if stopped:
         raise ScanStopped()
-    if proc.returncode != 0 or errors.strip():
+    if strict and (proc.returncode != 0 or errors.strip()):
         raise ProbeError("File could not be scanned")
-    return ends
+    spans = {}
+    for index, values in times.items():
+        ordered = sorted(values)
+        gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+        spans[index] = StreamSpan(ordered[0], ordered[-1], max(gaps, default=0.0))
+    return spans

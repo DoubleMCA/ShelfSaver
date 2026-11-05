@@ -118,23 +118,39 @@ def test_zero_duration_is_an_error():
         parse_probe(data, "x.mkv", 1000)
 
 
-def test_stream_end_times_reports_each_stream_separately(tmp_path):
-    from shelfsaver.probe import stream_end_times
+def test_scan_streams_reports_each_stream_separately(tmp_path):
+    from shelfsaver.probe import scan_streams
     src = make_video(tmp_path / "a.mkv", seconds=4, size="320x240")
     short = tmp_path / "b.mkv"
     subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-t", "2", "-i", str(src),
                     "-map", "0:v", "-map", "1:a", "-c", "copy", str(short)], check=True)
     info = probe(short, "ffprobe")
-    ends = stream_end_times(short, "ffprobe")
+    spans = scan_streams(short, "ffprobe")
     video = next(s.index for s in info.streams if s.kind == "video")
     aud = next(s.index for s in info.streams if s.kind == "audio")
-    assert ends[video] == pytest.approx(4.0, abs=0.1)
-    assert ends[aud] == pytest.approx(2.0, abs=0.1)
+    assert spans[video].start == pytest.approx(0.0, abs=0.1)
+    assert spans[video].end == pytest.approx(4.0, abs=0.2)
+    assert spans[aud].end == pytest.approx(2.0, abs=0.1)
+    assert spans[video].max_gap == pytest.approx(0.04, abs=0.01)
 
 
-def test_stream_end_times_rejects_garbage(tmp_path):
-    from shelfsaver.probe import stream_end_times
+def test_scan_streams_rejects_garbage(tmp_path):
+    from shelfsaver.probe import scan_streams
     bad = tmp_path / "x.mkv"
     bad.write_bytes(b"nope")
     with pytest.raises(ProbeError):
-        stream_end_times(bad, "ffprobe")
+        scan_streams(bad, "ffprobe")
+
+
+def test_scan_streams_tolerance_for_damaged_file(tmp_path):
+    import random
+    from shelfsaver.probe import scan_streams
+    path = make_video(tmp_path / "d.mkv", seconds=4, size="320x240", vcodec="libx265", crf=18)
+    data = bytearray(path.read_bytes())
+    mid = len(data) // 2
+    rng = random.Random(7)
+    data[mid:mid + 4000] = bytes(rng.randrange(256) for _ in range(4000))
+    path.write_bytes(bytes(data))
+    with pytest.raises(ProbeError):
+        scan_streams(path, "ffprobe", strict=True)
+    assert scan_streams(path, "ffprobe", strict=False)

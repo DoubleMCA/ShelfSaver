@@ -1,9 +1,10 @@
 import dataclasses
+import random
 import subprocess
 
 import pytest
 
-from shelfsaver.probe import probe
+from shelfsaver.probe import ProbeError, StreamSpan, probe
 from shelfsaver.verify import verify_output
 from tests.helpers import convert, make_video, strip
 
@@ -159,9 +160,11 @@ def test_source_with_differing_stream_lengths_passes_when_output_matches(tmp_pat
     assert r.passed, r
 
 
-def test_stop_during_length_scan(pair):
+def test_stop_during_length_scan(pair, monkeypatch):
+    import shelfsaver.verify as v
+    monkeypatch.setattr(v, "_plays", lambda *a, **k: pytest.fail("plays must not run"))
     r = verify_output(*pair, should_stop=lambda: True)
-    assert r.reason == "Stopped" and not r.passed
+    assert r.reason == "Stopped" and not r.passed and r.checks["plays"] is False
 
 
 def _cover_first_with_noise(tmp_path, noisy=True):
@@ -228,7 +231,144 @@ def test_missing_output_is_a_failed_result(tmp_path):
     assert not r.passed
 
 
-def test_stop_during_plays_check(pair):
+def test_stop_during_plays_check(pair, monkeypatch):
+    import shelfsaver.verify as v
+    monkeypatch.setattr(v, "_stream_lengths_ok", lambda *a, **k: True)
     r = verify_output(*pair, should_stop=lambda: True)
     assert not r.passed and r.reason == "Stopped"
     assert r.checks["plays"] is False and not r.not_worth_it
+
+
+def test_failed_scan_fails_length(pair, monkeypatch):
+    import shelfsaver.verify as v
+
+    def boom(*a, **k):
+        raise ProbeError("scan failed")
+    monkeypatch.setattr(v, "scan_streams", boom)
+    r = verify_output(*pair)
+    assert not r.passed and r.checks["length"] is False and r.checks["plays"] is False
+    assert r.reason == "New file is a different length"
+
+
+def _filtered(tmp_path, name, base, vf=None, af=None):
+    """Re-encode `base` keeping original timestamps, dropping frames by select/aselect."""
+    out = tmp_path / name
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(base), "-fps_mode", "passthrough"]
+    cmd += ["-vf", vf, "-c:v", "libx265", "-crf", "30"] if vf else ["-c:v", "copy"]
+    cmd += ["-af", af, "-c:a", "aac"] if af else ["-c:a", "copy"]
+    subprocess.run(cmd + [str(out)], check=True)
+    return out
+
+
+def _long_pair(tmp_path):
+    src = _src(tmp_path, seconds=20)
+    base = _out(tmp_path, "base.mkv", seconds=20)
+    return src, base
+
+
+def _check_fails_length(tmp_path, src, out):
+    src = dataclasses.replace(src, size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert not r.passed and r.checks["length"] is False, r
+    assert r.checks["tracks"] and r.checks["smaller"]
+
+
+def test_late_start_video_fails_length(tmp_path):
+    src, base = _long_pair(tmp_path)
+    _check_fails_length(tmp_path, src, _filtered(tmp_path, "o.mkv", base, vf="select='gte(t,10)'"))
+
+
+def test_mid_file_video_hole_fails_length(tmp_path):
+    src, base = _long_pair(tmp_path)
+    out = _filtered(tmp_path, "o.mkv", base, vf="select='lt(t,5)+gt(t,15)'")
+    _check_fails_length(tmp_path, src, out)
+
+
+def test_audio_hole_fails_length(tmp_path):
+    src, base = _long_pair(tmp_path)
+    out = _filtered(tmp_path, "o.mkv", base, af="aselect='lt(t,5)+gt(t,15)'")
+    _check_fails_length(tmp_path, src, out)
+
+
+def test_unfiltered_long_output_passes(tmp_path):
+    src, base = _long_pair(tmp_path)
+    src = dataclasses.replace(src, size=base.stat().st_size * 10)
+    assert verify_output(src, base, convert(), "ffmpeg", "ffprobe").passed
+
+
+def test_transport_stream_source_with_start_offset_passes(tmp_path):
+    h264 = make_video(tmp_path / "h.mkv", seconds=4, size=SIZE, crf=10)
+    ts = tmp_path / "src.ts"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(h264), "-c", "copy", str(ts)],
+                   check=True)
+    src = probe(ts, "ffprobe")
+    assert src.video_codec == "h264"
+    out = _out(tmp_path)
+    src = dataclasses.replace(src, size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert r.passed, r
+
+
+def test_large_source_start_offset_passes(tmp_path):
+    h264 = make_video(tmp_path / "h.mkv", seconds=4, size=SIZE, crf=10)
+    off = tmp_path / "off.mkv"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(h264), "-c", "copy",
+                    "-output_ts_offset", "3600", str(off)], check=True)
+    out = _out(tmp_path)
+    src = dataclasses.replace(probe(off, "ffprobe"), size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert r.passed, r
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_damaged_bytes_never_pass(tmp_path, ext):
+    out = _out(tmp_path, "d" + ext, crf=18)
+    data = bytearray(out.read_bytes())
+    mid = len(data) // 2
+    rng = random.Random(1234)
+    data[mid:mid + 4000] = bytes(rng.randrange(256) for _ in range(4000))
+    out.write_bytes(bytes(data))
+    src = dataclasses.replace(_src(tmp_path), size=out.stat().st_size * 10)
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert not r.passed
+
+
+def _fake_spans(monkeypatch, src_span, out_span):
+    import shelfsaver.verify as v
+    monkeypatch.setattr(v, "scan_streams",
+                        lambda path, *a, **k: src_span if "src" in str(path) else out_span)
+
+
+@pytest.mark.parametrize("duration,diff,expected", [
+    (100.0, 0.9, True), (100.0, 1.5, False),       # 1 s floor
+    (10000.0, 15.0, True), (10000.0, 25.0, False),  # 0.2% term (20 s)
+])
+def test_tolerance_floor_and_percentage(tmp_path, monkeypatch, duration, diff, expected):
+    import shelfsaver.verify as v
+    src = dataclasses.replace(_src(tmp_path), path="src.mkv", duration=duration)
+    out = probe(_out(tmp_path), "ffprobe")
+    vid = v._main_video(src).index
+    aud = next(s.index for s in src.streams if s.kind == "audio")
+    ovid = v._main_video(out).index
+    oaud = next(s.index for s in out.streams if s.kind == "audio")
+    span = StreamSpan(0.0, duration, 0.04)
+    short = StreamSpan(0.0, duration - diff, 0.04)
+    _fake_spans(monkeypatch, {vid: span, aud: span}, {ovid: short, oaud: span})
+    assert v._stream_lengths_ok(src, out, "out.mkv", convert(), "ffprobe", lambda: False) is expected
+
+
+def test_hdr_transfer_list_includes_arib_std_b67(tmp_path):
+    import shelfsaver.verify as v
+    base = _src(tmp_path)
+    src = dataclasses.replace(base, color_transfer="arib-std-b67", color_primaries="bt2020")
+    good = dataclasses.replace(probe(_out(tmp_path), "ffprobe"), color_transfer="arib-std-b67",
+                               color_primaries="bt2020", bit_depth=10)
+    assert v._tracks_ok(src, good, convert())
+    assert not v._tracks_ok(src, dataclasses.replace(good, bit_depth=8), convert())
+    assert not v._tracks_ok(src, dataclasses.replace(good, color_primaries="bt709"), convert())
+
+
+def test_truncated_output_is_never_excused_as_not_worth_it(tmp_path):
+    src = dataclasses.replace(_src(tmp_path, seconds=10), size=10_000_000)
+    r = verify_output(src, _out(tmp_path, seconds=5), convert(), "ffmpeg", "ffprobe")
+    assert r.checks["smaller"] and not r.not_worth_it and r.checks["length"] is False
