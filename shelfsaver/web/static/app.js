@@ -553,6 +553,27 @@
           }
         })]);
       }
+      if (file.status === 'failed' && !needsAttention) {
+        add(actions, [el('button', {
+          type: 'button', class: 'small danger', text: 'Delete file', 'data-focus': 'delete',
+          onclick: function () {
+            confirmDialog({
+              title: 'Delete this file for good?',
+              lines: [
+                file.path,
+                fmtSize(file.size) + (file.reason ? ' · ' + file.reason : ''),
+                'The file will be permanently deleted from the drive. There is no Recycle Bin and ' +
+                'ShelfSaver can\'t bring it back.'
+              ],
+              confirmLabel: 'Delete file', danger: true
+            }).then(function (yes) {
+              if (!yes) return;
+              api('POST', '/api/files/' + file.id + '/delete', { confirm: true })
+                .then(function () { refresh(); }, report);
+            });
+          }
+        })]);
+      }
       if (needsAttention) {
         add(actions, [el('button', {
           type: 'button', class: 'small', text: "I've dealt with this", 'data-focus': 'resolve',

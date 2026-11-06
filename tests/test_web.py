@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -135,7 +136,8 @@ def test_everything_requires_sign_in(client):
     for method, url in [("get", "/api/history"), ("get", "/api/libraries"), ("get", "/api/queue"),
                         ("get", "/api/settings"), ("get", "/api/browse"),
                         ("post", "/api/pause"), ("post", "/api/holding/clear"),
-                        ("post", "/api/files/1/retry"), ("post", "/api/files/1/resolve")]:
+                        ("post", "/api/files/1/retry"), ("post", "/api/files/1/resolve"),
+                        ("post", "/api/files/1/delete")]:
         assert getattr(client, method)(url).status_code == 401, url
 
 
@@ -1131,6 +1133,133 @@ def test_home_and_library_pages_have_room_for_the_history_tabs(client):
         assert 'id="filters"' in client.get(page).text, page
     app_js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "Conversion history" in app_js and "Scan history" in app_js
+
+
+# ---- deleting a failed file
+
+def failed_file(db, folder, name="bad.mkv", status="failed", content=b"damaged"):
+    library = db.add_library("TV", str(folder), "medium", False)
+    path = folder / name
+    path.write_bytes(content)
+    st = path.stat()
+    row = db.upsert_file(library.id, str(path), st.st_size, st.st_mtime, status, "Couldn't read this file")
+    return path, row
+
+
+def delete_file(authed, row, **body):
+    return authed.post(f"/api/files/{row.id}/delete", json={"confirm": True, **body})
+
+
+def test_deleting_a_failed_file_removes_it_from_disk_and_the_list(authed, parts, tmp_path, caplog):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"), content=b"")
+    with caplog.at_level(logging.INFO):
+        response = delete_file(authed, row)
+    assert response.status_code == 200
+    assert not path.exists() and db.get_file(row.id) is None
+    assert any(str(path) in r.getMessage() for r in caplog.records)
+
+
+def test_deleting_needs_confirmation(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    assert authed.post(f"/api/files/{row.id}/delete").status_code == 400
+    assert authed.post(f"/api/files/{row.id}/delete", json={"confirm": False}).status_code == 400
+    assert path.exists() and db.get_file(row.id) is not None
+
+
+def test_only_failed_files_can_be_deleted(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"), status="queued")
+    assert delete_file(authed, row).status_code == 400
+    assert path.exists() and db.get_file(row.id).status == "queued"
+
+
+def test_deleting_an_unknown_file_says_so(authed):
+    assert authed.post("/api/files/999/delete", json={"confirm": True}).status_code == 404
+
+
+@pytest.mark.parametrize("state", ["running", "swapping", "waiting_in_use"])
+def test_a_file_with_unfinished_work_is_not_deleted(authed, parts, tmp_path, state):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    db.update_run(db.start_run(row.id, 7, "H.264", None, "why").id, state=state)
+    assert delete_file(authed, row).status_code == 409
+    assert path.exists() and db.get_file(row.id) is not None
+
+
+def test_a_file_that_changed_since_it_failed_is_not_deleted(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    path.write_bytes(b"a fresh good copy of the episode")
+    assert delete_file(authed, row).status_code == 409
+    assert path.read_bytes() == b"a fresh good copy of the episode"
+    assert db.get_file(row.id) is not None
+
+
+def test_a_file_open_in_another_program_is_not_deleted(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    with open(path, "rb"):
+        assert delete_file(authed, row).status_code == 409
+    assert path.exists() and db.get_file(row.id) is not None
+
+
+def test_a_file_outside_its_library_is_not_deleted(authed, parts, tmp_path):
+    db, *_ = parts
+    folder = make_folder(tmp_path, "tv")
+    library = db.add_library("TV", str(folder), "medium", False)
+    for outside in (tmp_path / "other.mkv", folder / ".." / "sneaky.mkv"):
+        outside.write_bytes(b"not in the library")
+        st = outside.stat()
+        row = db.upsert_file(library.id, str(outside), st.st_size, st.st_mtime, "failed", "x")
+        assert delete_file(authed, row).status_code == 400
+        assert outside.exists() and db.get_file(row.id) is not None
+
+
+def test_a_folder_at_the_files_path_is_not_deleted(authed, parts, tmp_path):
+    db, *_ = parts
+    folder = make_folder(tmp_path, "tv")
+    library = db.add_library("TV", str(folder), "medium", False)
+    inner = make_folder(folder, "looks-like-a-file.mkv")
+    st = inner.stat()
+    row = db.upsert_file(library.id, str(inner), st.st_size, st.st_mtime, "failed", "x")
+    assert delete_file(authed, row).status_code == 400
+    assert inner.is_dir() and db.get_file(row.id) is not None
+
+
+def test_an_offline_library_keeps_its_row(authed, parts, tmp_path):
+    db, *_ = parts
+    folder = make_folder(tmp_path, "tv")
+    path, row = failed_file(db, folder)
+    path.unlink()
+    folder.rmdir()
+    assert delete_file(authed, row).status_code == 400
+    assert db.get_file(row.id) is not None
+
+
+def test_a_file_already_gone_just_leaves_the_list(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    path.unlink()
+    assert delete_file(authed, row).status_code == 200
+    assert db.get_file(row.id) is None
+
+
+def test_past_attempts_stay_in_conversion_history_after_deleting(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    run = db.start_run(row.id, 7, "H.264", None, "why")
+    db.update_run(run.id, state="failed", error="The conversion failed", finished_at=5.0)
+    assert delete_file(authed, row).status_code == 200
+    rows = authed.get("/api/history", params={"show": "conversions"}).json()
+    assert [r["name"] for r in rows] == ["bad.mkv"]
+    assert authed.get("/api/history", params={"show": "scans"}).json() == []
+
+
+def test_the_page_warns_before_deleting(client):
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "/delete" in app_js and "no Recycle Bin" in app_js
 
 
 def test_try_again_is_offered_for_a_scan_failure_but_not_a_skip(authed, parts):

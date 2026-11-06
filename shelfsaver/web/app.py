@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import stat
 import re
 import secrets
 import string
@@ -550,6 +551,57 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                              "Try again in a moment.")
         if outcome != "resolved":
             raise _fail(400, "This file has no unfinished replacement to close.")
+        return {"ok": True}
+
+    @api.post("/files/{file_id}/delete")
+    def delete_failed_file(file_id: int, body: Optional[ConfirmBody] = None):
+        if body is None or body.confirm is not True:
+            raise _fail(400, "Please confirm that this file should be deleted for good.")
+        file = db.get_file(file_id)
+        if file is None:
+            raise _fail(404, "That file isn't in the list any more.")
+        if file.status != "failed":
+            raise _fail(400, "Only a failed file can be deleted. Nothing was changed.")
+        if any(r.file_id == file_id for r in db.active_runs(ACTIVE_RUN_STATES)):
+            raise _fail(409, "ShelfSaver still has unfinished work on this file, and it could be "
+                             "the only good copy. Nothing was changed.")
+        library = next((l for l in db.list_libraries() if l.id == file.library_id), None)
+        path = os.path.abspath(file.path)
+        if (library is None or not swap._is_inside(path, library.path)
+                or swap._is_inside(path, swap.work_root(path))):
+            raise _fail(400, "This file isn't in one of your library folders, so ShelfSaver won't "
+                             "delete it. Nothing was changed.")
+        if not os.path.isdir(swap.ext_path(library.path)):
+            raise _fail(400, "The library drive can't be reached. Nothing was changed.")
+        try:
+            found = os.lstat(swap.ext_path(path))
+        except FileNotFoundError:
+            logger.info("Removed %s from the list, as it was already gone", path)
+            db.delete_file(file_id)
+            return {"ok": True}
+        except OSError as exc:
+            logger.warning("Could not check %s before deleting it: %s", path, exc)
+            raise _fail(409, "ShelfSaver couldn't check this file. Nothing was changed.")
+        if not stat.S_ISREG(found.st_mode):
+            raise _fail(400, "That isn't an ordinary file, so ShelfSaver won't delete it. "
+                             "Nothing was changed.")
+        if (found.st_size, found.st_mtime) != (file.size, file.mtime):
+            raise _fail(409, "This file has changed since it failed, so it may be a new copy. "
+                             "Nothing was changed.")
+        try:
+            os.unlink(swap.ext_path(path))
+        except FileNotFoundError:
+            pass
+        except PermissionError as exc:
+            logger.warning("Could not delete %s: %s", path, exc)
+            raise _fail(409, "This file is open in another program or is read-only. "
+                             "Nothing was changed.")
+        except OSError as exc:
+            logger.warning("Could not delete %s: %s", path, exc)
+            raise _fail(409, "ShelfSaver couldn't delete this file. Nothing was changed.")
+        logger.info("Deleted %s at the owner's request (%s bytes, failed: %s)", path, file.size,
+                    file.reason)
+        db.delete_file(file_id)
         return {"ok": True}
 
     # ---- libraries

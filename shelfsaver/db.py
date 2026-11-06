@@ -288,6 +288,10 @@ class Database:
         )
         return cur.rowcount > 0
 
+    def delete_file(self, id: int) -> None:
+        """Forget a file's row. Its runs stay, as the record of what was tried."""
+        self._exec("DELETE FROM files WHERE id=?", (id,))
+
     def set_missing_unless_owned(self, id: int) -> bool:
         cur = self._exec(
             "UPDATE files SET status='missing', reason=NULL, updated_at=? WHERE id=? AND "
