@@ -1,4 +1,5 @@
 import dataclasses
+import io
 import random
 import subprocess
 
@@ -193,12 +194,44 @@ def test_cover_first_file_with_damaged_video_fails_plays(tmp_path):
     assert r.checks["length"] and r.checks["tracks"] and r.checks["smaller"]
     assert r.checks["plays"] is False and not r.passed
     assert r.reason == "New file failed the playback check"
+    assert r.log  # what FFmpeg said while decoding, so the failure explains itself
 
 
 def test_cover_first_file_with_good_video_passes(tmp_path):
     out = _cover_first_with_noise(tmp_path, noisy=False)
     src = dataclasses.replace(_src(tmp_path), size=out.stat().st_size * 10)
-    assert verify_output(src, out, convert(), "ffmpeg", "ffprobe").passed
+    r = verify_output(src, out, convert(), "ffmpeg", "ffprobe")
+    assert r.passed and r.log == ""
+
+
+def test_ffmpeg_that_will_not_start_gives_a_reason(tmp_path, monkeypatch):
+    from shelfsaver import verify as v
+
+    def no_ffmpeg(*a, **k):
+        raise OSError("no such program")
+
+    monkeypatch.setattr(v.subprocess, "Popen", no_ffmpeg)
+    assert v._plays(tmp_path / "a.mkv", 0, "ffmpeg", lambda: False) == (
+        False, "FFmpeg could not start: no such program")
+
+
+def test_silent_decode_failure_names_the_exit_code(tmp_path, monkeypatch):
+    from shelfsaver import verify as v
+
+    class Quiet:
+        returncode = 3
+        stderr = io.BytesIO(b"")
+
+        def poll(self):
+            return 3
+
+        def wait(self, timeout=None):
+            return 3
+
+    monkeypatch.setattr(v, "kill_with_app", lambda proc: None)
+    monkeypatch.setattr(v.subprocess, "Popen", lambda *a, **k: Quiet())
+    plays, log = v._plays(tmp_path / "a.mkv", 0, "ffmpeg", lambda: False)
+    assert plays is False and "3" in log
 
 
 def test_changed_primaries_on_hdr_source_fails_tracks(tmp_path):
@@ -379,7 +412,7 @@ def test_full_decode_is_tied_to_the_app(tmp_path, monkeypatch):
     tied = []
     monkeypatch.setattr(v, "kill_with_app", lambda proc: tied.append(proc.pid))
     path = make_video(tmp_path / "a.mkv", seconds=1, size="320x180")
-    assert v._plays(path, 0, "ffmpeg", lambda: False) is True
+    assert v._plays(path, 0, "ffmpeg", lambda: False) == (True, "")
     assert len(tied) == 1
 
 
@@ -472,6 +505,6 @@ def test_how_far_short_a_source_can_be(tmp_path, monkeypatch, duration, span_end
     span = StreamSpan(0.0, span_end, 0.04)
     _fake_spans(monkeypatch, {vid: span, aud: span}, {ovid: span, oaud: span})
     src = dataclasses.replace(src, size=out.size * 10)
-    monkeypatch.setattr(v, "_plays", lambda *a, **k: True)
+    monkeypatch.setattr(v, "_plays", lambda *a, **k: (True, ""))
     r = verify_output(src, out.path, convert(), "ffmpeg", "ffprobe")
     assert (r.reason == CUT_SHORT) is cut_short and r.passed is not cut_short

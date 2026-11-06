@@ -20,6 +20,7 @@ from shelfsaver import swap, worker as worker_module
 from shelfsaver.config import Config
 from shelfsaver.db import Database
 from shelfsaver.encode import EncodeResult
+from shelfsaver.models import VerifyResult
 from shelfsaver.probe import probe
 from shelfsaver.scanner import Scanner
 from shelfsaver.swap import FileInUse, TargetExists, UnexpectedSwapState
@@ -319,6 +320,17 @@ def test_verify_failure_keeps_original_and_records_reason(env):
     assert json.loads(run["checks_json"])["length"] is False
     assert "encoder said hello" in run["log_tail"]
     assert env.scratch_runs() == [] and env.incoming_files() == []
+
+
+def test_playback_errors_are_kept_after_the_encoder_log(env):
+    checks = {"length": True, "tracks": True, "smaller": True, "plays": False}
+    env.monkeypatch.setattr(worker_module, "verify_output", lambda *a, **k: VerifyResult(
+        False, checks, "New file failed the playback check", log="Invalid data at 01:02:03"))
+    env.queue_video()
+    env.worker.process_one()
+    log = env.run_row()["log_tail"]
+    assert env.file().status == "failed"
+    assert log.index("encoder said hello") < log.index("Invalid data at 01:02:03")
 
 
 def test_not_worth_it_is_skipped_not_failed(env):

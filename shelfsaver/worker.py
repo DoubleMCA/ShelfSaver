@@ -694,7 +694,10 @@ class Worker:
             raise _RunFailed("The copy on the scratch disk could not be read") from exc
         verdict = verify_output(source_info, job.output, job.decision, self.config.ffmpeg,
                                 self.config.ffprobe, self._should_stop)
-        self.db.update_run(job.run.id, checks_json=json.dumps(verdict.checks))
+        if verdict.log:
+            job.log_tail = f"{job.log_tail.rstrip()}\n\nPlayback check:\n{verdict.log}"
+        self.db.update_run(job.run.id, checks_json=json.dumps(verdict.checks),
+                           log_tail=job.log_tail)
         if not verdict.passed:
             if verdict.reason == "Stopped":
                 raise _Stopped()

@@ -108,3 +108,4 @@ class VerifyResult:
     checks: dict
     reason: str = ""
     not_worth_it: bool = False
+    log: str = ""

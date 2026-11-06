@@ -14,7 +14,7 @@ from .quality import MIN_SAVINGS
 
 CHECKS = ("length", "tracks", "smaller", "plays")
 STOP_POLL_SECONDS = 0.2
-STDERR_KEEP_BYTES = 64 * 1024
+STDERR_KEEP_BYTES = 8 * 1024  # the first errors, which are the ones that explain a failure
 
 REASONS = {
     "length": "New file is a different length",
@@ -148,15 +148,15 @@ def _smaller_ok(source: MediaInfo, output: MediaInfo) -> bool:
 
 
 def _plays(output: Path, video_index: int, ffmpeg, should_stop: Callable[[], bool]):
-    """Decode the whole file. Returns True, False, or None when stopped."""
+    """Decode the whole file. Returns (True, False, or None when stopped) and what FFmpeg said."""
     cmd = [str(ffmpeg), "-v", "error", "-i", str(output),
            "-map", f"0:{video_index}", "-map", "0:a?", "-f", "null", "-"]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, creationflags=flags)
-    except OSError:
-        return False
+    except OSError as exc:
+        return False, f"FFmpeg could not start: {exc}"
     kill_with_app(proc)
     seen = bytearray()
 
@@ -188,8 +188,11 @@ def _plays(output: Path, video_index: int, ffmpeg, should_stop: Callable[[], boo
         reader.join(timeout=5)
         proc.stderr.close()
     if stopped:
-        return None
-    return proc.returncode == 0 and not seen.strip()
+        return None, ""
+    said = seen.decode("utf-8", "replace").strip()
+    if proc.returncode != 0 and not said:
+        said = f"FFmpeg stopped with exit code {proc.returncode}"
+    return proc.returncode == 0 and not said, said
 
 
 def verify_output(source: MediaInfo, output, decision: Decision, ffmpeg, ffprobe,
@@ -222,10 +225,10 @@ def verify_output(source: MediaInfo, output, decision: Decision, ffmpeg, ffprobe
         return VerifyResult(False, checks, REASONS["smaller"], not_worth_it=True)
 
     video = _main_video(out)
-    result = _plays(Path(output), video.index, ffmpeg, should_stop)
+    result, said = _plays(Path(output), video.index, ffmpeg, should_stop)
     if result is None:
         return VerifyResult(False, checks, "Stopped")
     checks["plays"] = result
     if not result:
-        return VerifyResult(False, checks, REASONS["plays"])
+        return VerifyResult(False, checks, REASONS["plays"], log=said)
     return VerifyResult(True, checks, "")

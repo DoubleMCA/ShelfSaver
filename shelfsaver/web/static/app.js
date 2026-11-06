@@ -536,6 +536,9 @@
       var happened = row.status === 'converted' || row.status === 'skipped' ? '' : (row.reason || run.error || '');
       if (!happened && row.status === 'missing') happened = "ShelfSaver can't find this file in its folder any more.";
       if (happened) add(grid, [field('What happened', happened, true)]);
+      if (run.state === 'failed' && run.log_tail) {
+        add(grid, [field('What FFmpeg said', el('pre', { class: 'run-log', text: run.log_tail }), true)]);
+      }
       add(grid, [field('Where it is', el('span', { class: 'mono small', text: file.path }), true)]);
       add(cell, [grid]);
 

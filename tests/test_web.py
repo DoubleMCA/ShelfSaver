@@ -489,6 +489,14 @@ def test_file_details_hides_internal_fields(authed, parts, tmp_path):
     assert authed.get("/api/files/9999").status_code == 404
 
 
+def test_file_details_include_what_ffmpeg_said(authed, parts, tmp_path):
+    db, *_ = parts
+    lib, f, run = seed_run(db, tmp_path, state="failed", file_status="failed", reason="x")
+    db.update_run(run.id, log_tail="Playback check:\nInvalid data")
+    body = authed.get(f"/api/files/{f.id}").json()
+    assert body["runs"][0]["log_tail"] == "Playback check:\nInvalid data"
+
+
 def test_retry_goes_through_the_worker(authed, parts, tmp_path):
     db, worker, *_ = parts
     lib, f, run = seed_run(db, tmp_path, state="failed", file_status="failed", reason="x")
