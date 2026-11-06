@@ -7,6 +7,10 @@ original, and it never removes anything you did not agree to.
 
 It runs on one Windows 11 PC with an NVIDIA graphics card, and you use it from a web page.
 
+**This app is dumb on purpose.** There are no advanced settings and no secret menu of encoder
+knobs. I just wanted to free up some disk space without earning a degree in video compression.
+If you came for the fancy version, this isn't it, and I'm thrilled about that.
+
 ## What it does
 
 - Treats each folder you add as a library, and picks up new files as they arrive.
