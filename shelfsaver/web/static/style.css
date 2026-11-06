@@ -309,6 +309,14 @@ dialog h3 { margin: 0 0 10px; font-size: 18px; }
 .setting { padding: 14px 0; border-bottom: 1px solid var(--line-soft); }
 .setting:last-child { border-bottom: 0; }
 .setting h3 { margin: 0 0 4px; font-size: 16px; }
+.blackouts { list-style: none; margin: 8px 0; padding: 0; }
+.blackout { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0; }
+.blackout-times { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }
+.blackout-days { display: flex; flex-wrap: wrap; gap: 6px 14px; border: 0; padding: 0; margin: 8px 0 12px; min-width: 0; }
+.blackout-times input { font-size: 16px; padding: 8px 10px; background: var(--field); color: var(--text); border: 1px solid var(--line); border-radius: 10px; }
+.blackout-days legend { padding: 0; margin-bottom: 4px; font-weight: 700; }
+.blackout-days label { display: flex; align-items: center; gap: 6px; }
+.blackout-days input { width: 20px; height: 20px; margin: 0; flex: none; }
 details.secondary { margin-top: 26px; color: var(--muted); }
 details.secondary summary { cursor: pointer; font-size: 14px; padding: 6px 0; }
 .run-log { max-height: 240px; overflow: auto; margin: 4px 0 0; white-space: pre-wrap; word-break: break-all; background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px; color: var(--text); }

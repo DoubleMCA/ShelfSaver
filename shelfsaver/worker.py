@@ -19,6 +19,7 @@ import stat
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -26,6 +27,7 @@ from .decide import decide
 from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
 from .models import IGNORED_REASON, RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import UNREADABLE, ProbeError, file_details, probe
+from .schedule import blackout_end, load_blackouts
 from .swap import (
     FileInUse,
     SwapPlan,
@@ -45,6 +47,8 @@ from .swap import (
 from .verify import HDR_TRANSFERS, verify_output
 
 logger = logging.getLogger(__name__)
+
+_local_now = datetime.now
 
 GB = 1024 ** 3
 SPACE_RESERVE_BYTES = 5 * GB
@@ -375,7 +379,7 @@ class Worker:
     @staticmethod
     def _idle_fields() -> dict:
         return {"state": "idle", "file": None, "step": None, "percent": None,
-                "eta_seconds": None, "message": None}
+                "eta_seconds": None, "message": None, "blackout_until": None}
 
     def _set_status(self, state: str, file: Optional[str] = None, step: Optional[str] = None,
                     message: Optional[str] = None) -> None:
@@ -431,6 +435,13 @@ class Worker:
 
         scratch = self._usable_scratch()
         if scratch is None:
+            return worked
+        # Only new files wait: a file already under way finishes, and swaps above still happen.
+        until = blackout_end(load_blackouts(self.db.get_setting("blackouts")), _local_now())
+        if until is not None:
+            self._set_status("blackout")
+            with self._lock:
+                self._status["blackout_until"] = until.isoformat(timespec="minutes")
             return worked
         file = self._next_file()
         if file is None:

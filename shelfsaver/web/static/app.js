@@ -723,6 +723,7 @@
 
   // ---- Home
 
+  var DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   var PAUSE_HELP = 'Stops converting. The file being converted will start over when you resume.';
 
   function basenameOfStatus(worker) { return baseName(worker.file); }
@@ -734,6 +735,17 @@
         (scanner.pending === 1 ? ' file' : ' files') + ' to check';
     }
     return scanner.scanning ? 'Looking through your libraries…' : null;
+  }
+
+  function fmtClock(date) {
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+
+  // Comes in the PC's own local time, and is read as local here so the clock digits stay the same.
+  function fmtBlackoutEnd(until) {
+    var end = new Date(until);
+    var today = end.toDateString() === new Date().toDateString();
+    return (today ? '' : DAY_NAMES[(end.getDay() + 6) % 7] + ' ') + fmtClock(end);
   }
 
   function drawNow(box, status) {
@@ -753,6 +765,9 @@
     } else if (worker.state === 'paused') {
       title = 'Paused';
       line = 'Nothing will be converted until you press Resume. A file that was being converted will start over when you resume.';
+    } else if (worker.state === 'blackout') {
+      title = 'Blackout until ' + fmtBlackoutEnd(worker.blackout_until);
+      line = 'No new files start during a blackout. You can change the times in Settings.';
     } else if (worker.state === 'no_scratch') {
       title = 'Waiting for a scratch disk';
       line = 'Conversions start once a scratch disk is available.';
@@ -1009,6 +1024,69 @@
     var trouble = byId('trouble-body');
     var data = null;
 
+    function clockText(value) {
+      var parts = value.split(':');
+      return fmtClock(new Date(2000, 0, 1, Number(parts[0]), Number(parts[1])));
+    }
+
+    function daysText(days) {
+      if (days.length === 7) return 'Every day';
+      if (days.join() === '0,1,2,3,4') return 'Weekdays';
+      if (days.join() === '5,6') return 'Weekends';
+      return days.map(function (d) { return DAY_NAMES[d]; }).join(', ');
+    }
+
+    function blackoutText(blackout) {
+      var overnight = blackout.end < blackout.start ? ' (next day)' : '';
+      return daysText(blackout.days) + ', ' + clockText(blackout.start) + ' to ' +
+        clockText(blackout.end) + overnight;
+    }
+
+    function drawSchedule(holder) {
+      var note = el('p', { class: 'small', role: 'status' });
+      function save(blackouts) {
+        api('PATCH', '/api/settings', { blackouts: blackouts }).then(function (saved) {
+          data.blackouts = saved.blackouts;
+          drawSchedule(holder);
+        }, function (problem) {
+          note.className = 'small err';
+          note.textContent = messageOf(problem);
+        });
+      }
+
+      var rows = data.blackouts.map(function (blackout, index) {
+        return el('li', { class: 'blackout' }, el('span', { text: blackoutText(blackout) }),
+          el('button', { type: 'button', class: 'small', text: 'Remove', onclick: function () {
+            save(data.blackouts.filter(function (b, i) { return i !== index; }));
+          } }));
+      });
+
+      var start = el('input', { type: 'time', id: 'blackout-start', value: '18:00' });
+      var end = el('input', { type: 'time', id: 'blackout-end', value: '23:00' });
+      var dayBoxes = DAY_NAMES.map(function (name, day) {
+        return el('input', { type: 'checkbox', id: 'blackout-day-' + day, value: day, checked: true });
+      });
+
+      fill(holder,
+        el('h3', { text: 'Schedule' }),
+        el('p', { class: 'muted small', text: 'ShelfSaver runs 24/7 unless you add a blackout. No new files start during a blackout, and a file already being converted finishes first. Times follow the clock on the PC running ShelfSaver.' }),
+        rows.length ? el('ul', { class: 'blackouts' }, rows)
+          : el('p', { class: 'small', text: 'Runs 24/7' }),
+        el('div', { class: 'blackout-times' },
+          el('div', null, el('label', { class: 'field', for: 'blackout-start', text: 'From' }), start),
+          el('div', null, el('label', { class: 'field', for: 'blackout-end', text: 'To' }), end)),
+        el('fieldset', { class: 'blackout-days' }, el('legend', { class: 'field', text: 'Days' }),
+          dayBoxes.map(function (box, day) {
+            return el('label', { for: box.id }, box, el('span', { text: DAY_NAMES[day] }));
+          })),
+        el('button', { type: 'button', text: 'Add a blackout', onclick: function () {
+          var days = dayBoxes.filter(function (box) { return box.checked; })
+            .map(function (box) { return Number(box.value); });
+          save(data.blackouts.concat([{ days: days, start: start.value, end: end.value }]));
+        } }),
+        note);
+    }
+
     function draw() {
       var scratch = el('input', { type: 'text', id: 'scratch', class: 'mono', autocomplete: 'off',
         value: data.scratch_dir || '' });
@@ -1066,6 +1144,9 @@
         });
       } });
 
+      var schedule = el('div', { class: 'setting' });
+      drawSchedule(schedule);
+
       fill(box,
         el('div', { class: 'setting' },
           el('h3', { text: 'Scratch disk' }),
@@ -1082,7 +1163,8 @@
           el('p', { class: 'muted small', text: 'When on, replaced originals wait in a holding folder until you clear it, so you can be sure the new files are good.' }),
           el('label', { class: 'check', for: 'holding' }, holdBox, el('span', { text: 'Hold originals after replacing them' })),
           el('p', { class: 'small', text: 'Held right now: ' + fmtSize(data.held_bytes) }),
-          clearBtn, holdNote));
+          clearBtn, holdNote),
+        schedule);
 
       fill(trouble,
         el('p', { class: 'small', text: 'Only needed if you want an AI assistant to look at your history. It can read but never change anything.' }),

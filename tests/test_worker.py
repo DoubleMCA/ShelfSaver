@@ -11,6 +11,7 @@ import threading
 import time
 from contextlib import contextmanager
 from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -270,7 +271,7 @@ def test_success_records_the_outcome(env):
 def test_nothing_queued_returns_false_and_is_idle(env):
     assert env.worker.process_one() is False
     assert env.worker.status() == {"state": "idle", "file": None, "step": None, "percent": None,
-                                   "eta_seconds": None, "message": None}
+                                   "eta_seconds": None, "message": None, "blackout_until": None}
 
 
 def test_holding_off_replaces_without_keeping_a_copy(env):
@@ -320,6 +321,78 @@ def test_verify_failure_keeps_original_and_records_reason(env):
     assert json.loads(run["checks_json"])["length"] is False
     assert "encoder said hello" in run["log_tail"]
     assert env.scratch_runs() == [] and env.incoming_files() == []
+
+
+MONDAY_NIGHT = datetime(2026, 11, 2, 19, 0)  # a Monday
+EVENINGS = json.dumps([{"days": [0, 1, 2, 3, 4, 5, 6], "start": "18:00", "end": "23:00"}])
+
+
+def _in_blackout(env, now=MONDAY_NIGHT):
+    env.monkeypatch.setattr(worker_module, "_local_now", lambda: now)
+    env.db.set_setting("blackouts", EVENINGS)
+
+
+def test_no_new_file_starts_during_a_blackout(env):
+    _in_blackout(env)
+    f = env.queue_video()
+    assert env.worker.process_one() is False
+    assert env.encodes == 0 and env.db.get_file(f.id).status == "queued"
+    state = env.worker.status()
+    assert state["state"] == "blackout" and state["blackout_until"] == "2026-11-02T23:00"
+
+
+def test_the_queue_carries_on_when_a_blackout_ends(env):
+    _in_blackout(env)
+    f = env.queue_video()
+    env.worker.process_one()
+    env.monkeypatch.setattr(worker_module, "_local_now", lambda: datetime(2026, 11, 2, 23, 0))
+    assert env.worker.process_one() is True
+    assert env.db.get_file(f.id).status == "converted"
+    assert env.worker.status()["blackout_until"] is None
+
+
+def test_a_file_already_converting_finishes_when_a_blackout_starts(env):
+    env.monkeypatch.setattr(worker_module, "_local_now", lambda: MONDAY_NIGHT)
+    first = env.queue_video()
+
+    def blackout_arrives(cmd, duration, on_progress, should_stop):
+        env.db.set_setting("blackouts", EVENINGS)
+        return env._fake_encode(cmd, duration, on_progress, should_stop)
+
+    env.use_encode(blackout_arrives)
+    env.worker.process_one()
+    assert env.db.get_file(first.id).status == "converted"
+    second = env.queue_video(name="second.mkv")
+    assert env.worker.process_one() is False
+    assert env.db.get_file(second.id).status == "queued"
+
+
+def test_finished_conversions_can_still_be_swapped_in_during_a_blackout(env):
+    _in_blackout(env)
+    swaps = []
+    env.monkeypatch.setattr(env.worker, "_advance_due_swaps", lambda: swaps.append(1) or True)
+    assert env.worker.process_one() is True and swaps == [1]
+
+
+def test_pausing_during_a_blackout_shows_as_paused_and_ending_it_does_not_resume(env):
+    _in_blackout(env)
+    f = env.queue_video()
+    env.worker.pause()
+    assert env.worker.process_one() is False
+    assert env.worker.status()["state"] == "paused"
+    env.monkeypatch.setattr(worker_module, "_local_now", lambda: datetime(2026, 11, 2, 23, 0))
+    assert env.worker.process_one() is False
+    assert env.db.get_file(f.id).status == "queued" and env.encodes == 0
+
+
+def test_resuming_during_a_blackout_does_not_override_it(env):
+    _in_blackout(env)
+    f = env.queue_video()
+    env.worker.pause()
+    env.worker.resume()
+    assert env.worker.process_one() is False
+    assert env.db.get_file(f.id).status == "queued"
+    assert env.worker.status()["state"] == "blackout"
 
 
 def test_playback_errors_are_kept_after_the_encoder_log(env):

@@ -478,6 +478,39 @@ def test_history_uses_the_files_reason(authed, parts, tmp_path):
     assert row["status"] == "failed" and row["reason"] == "The conversion failed"
 
 
+def test_there_are_no_blackouts_by_default(authed):
+    assert authed.get("/api/settings").json()["blackouts"] == []
+
+
+def test_blackouts_are_saved_and_can_be_cleared(authed):
+    chosen = [{"days": [4, 0], "start": "18:00", "end": "23:00"}]
+    tidy = [{"days": [0, 4], "start": "18:00", "end": "23:00"}]
+    r = authed.patch("/api/settings", json={"blackouts": chosen})
+    assert r.status_code == 200 and r.json()["blackouts"] == tidy
+    assert authed.get("/api/settings").json()["blackouts"] == tidy
+    assert authed.patch("/api/settings", json={"blackouts": []}).json()["blackouts"] == []
+    assert authed.get("/api/settings").json()["blackouts"] == []
+
+
+def test_changing_another_setting_leaves_blackouts_alone(authed):
+    chosen = [{"days": [0], "start": "18:00", "end": "23:00"}]
+    authed.patch("/api/settings", json={"blackouts": chosen})
+    authed.patch("/api/settings", json={"holding_enabled": True})
+    assert authed.get("/api/settings").json()["blackouts"] == chosen
+
+
+def test_a_blackout_that_makes_no_sense_is_refused_with_a_reason(authed):
+    r = authed.patch("/api/settings", json={
+        "blackouts": [{"days": [0], "start": "18:00", "end": "18:00"}]})
+    assert r.status_code == 400 and "same" in r.json()["detail"]
+    assert authed.get("/api/settings").json()["blackouts"] == []
+
+
+def test_blackouts_need_sign_in(client):
+    r = client.patch("/api/settings", json={"blackouts": []})
+    assert r.status_code == 401
+
+
 def test_system_use_needs_sign_in(client):
     assert client.get("/api/system").status_code == 401
 

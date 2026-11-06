@@ -28,6 +28,7 @@ from .. import swap
 from ..db import ensure_mcp_token
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 from ..models import IGNORED_REASON
+from ..schedule import clean_blackouts, load_blackouts
 from ..system_usage import SystemUsage
 from ..worker import _format_name
 
@@ -145,6 +146,7 @@ class LibraryPatch(BaseModel):
 class SettingsPatch(BaseModel):
     scratch_dir: Optional[str] = None
     holding_enabled: Optional[StrictBool] = None
+    blackouts: Optional[list[Any]] = None
 
 
 # ---- path helpers
@@ -744,6 +746,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         return {
             "scratch_dir": scratch_setting(),
             "holding_enabled": db.get_setting("holding_enabled") == "1",
+            "blackouts": load_blackouts(db.get_setting("blackouts")),
             "held_bytes": info["held_bytes"],
             "held_libraries": info["held_libraries"],
             "held_drives": info["held_drives"],
@@ -753,6 +756,12 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     @api.patch("/settings")
     def change_settings(body: SettingsPatch):
+        blackouts = None
+        if body.blackouts is not None:
+            try:
+                blackouts = clean_blackouts(body.blackouts)
+            except ValueError as exc:
+                raise _fail(400, str(exc))
         if body.scratch_dir is not None:
             scratch = _check_local_folder(body.scratch_dir, "scratch")
             for library in db.list_libraries():
@@ -770,8 +779,11 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             db.set_setting("scratch_dir", scratch)
         if body.holding_enabled is not None:
             db.set_setting("holding_enabled", "1" if body.holding_enabled else "0")
+        if blackouts is not None:
+            db.set_setting("blackouts", json.dumps(blackouts))
         return {"scratch_dir": scratch_setting(),
-                "holding_enabled": db.get_setting("holding_enabled") == "1"}
+                "holding_enabled": db.get_setting("holding_enabled") == "1",
+                "blackouts": load_blackouts(db.get_setting("blackouts"))}
 
     @api.post("/holding/clear")
     def clear_holding(body: Optional[ConfirmBody] = None):
