@@ -11,6 +11,26 @@ It runs on one Windows 11 PC with an NVIDIA graphics card, and you use it from a
 knobs. I just wanted to free up some disk space without earning a degree in video compression.
 If you came for the fancy version, this isn't it, and I'm thrilled about that.
 
+## Screenshots
+
+These show a fresh install with nothing converted yet, and the folder names are made up.
+
+**Home**
+
+![The home page, with space saved, libraries and history](screenshots/home.png)
+
+**Library**
+
+![A library page, with its stats and history](screenshots/library.png)
+
+**Queue**
+
+![The queue page, with nothing waiting](screenshots/queue.png)
+
+**Settings**
+
+![The settings page, with the scratch disk and holding folder](screenshots/settings.png)
+
 ## What it does
 
 - Treats each folder you add as a library, and picks up new files as they arrive.
