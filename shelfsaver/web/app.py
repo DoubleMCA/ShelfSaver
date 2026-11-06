@@ -27,6 +27,7 @@ from pydantic import BaseModel, StrictBool
 from .. import swap
 from ..db import ensure_mcp_token
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
+from ..models import IGNORED_REASON
 from ..worker import _format_name
 
 logger = logging.getLogger(__name__)
@@ -528,9 +529,32 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         if file is None:
             raise _fail(404, "That file isn't in the list any more.")
         kept = any(r.file_id == file_id for r in db.active_runs(("swapping", "waiting_in_use")))
-        if not kept and file.status not in ("failed", "waiting_in_use"):
+        if (not kept and file.status not in ("failed", "waiting_in_use")
+                and file.reason != IGNORED_REASON):
             raise _fail(400, "This file isn't waiting to be tried again.")
         worker.retry(file_id)
+        return {"ok": True}
+
+    @api.post("/files/{file_id}/ignore")
+    def ignore(file_id: int):
+        file = db.get_file(file_id)
+        if file is None:
+            raise _fail(404, "That file isn't in the list any more.")
+        if file.status != "failed":
+            raise _fail(400, "Only a failed file can be ignored. Nothing was changed.")
+        if any(r.file_id == file_id for r in db.active_runs(ACTIVE_RUN_STATES)):
+            raise _fail(409, "ShelfSaver still has unfinished work on this file. "
+                             "Nothing was changed.")
+        try:
+            found = os.stat(swap.ext_path(file.path))
+        except OSError:
+            raise _fail(400, "ShelfSaver can't find this file, so there is nothing to ignore. "
+                             "Nothing was changed.")
+        if (found.st_size, found.st_mtime) != (file.size, file.mtime):
+            raise _fail(409, "This file has changed since it failed, so it may be a new copy. "
+                             "Nothing was changed.")
+        logger.info("Ignoring %s at the owner's request (failed: %s)", file.path, file.reason)
+        db.set_file_status(file_id, "skipped", IGNORED_REASON)
         return {"ok": True}
 
     @api.post("/files/{file_id}/resolve")

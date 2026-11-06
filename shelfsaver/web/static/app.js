@@ -382,6 +382,7 @@
 
   // ---- history table, used on Home and on a library's page
 
+  var IGNORED_REASON = 'Ignored, left as is';
   var HISTORY_TABS = {
     conversions: { label: 'Conversion history', kind: 'run', empty: 'Nothing has been converted yet.' },
     scans: { label: 'Scan history', kind: 'file',
@@ -553,7 +554,23 @@
           }
         })]);
       }
+      if (file.status === 'skipped' && file.reason === IGNORED_REASON) {
+        add(actions, [el('button', {
+          type: 'button', class: 'small', text: 'Stop ignoring', 'data-focus': 'retry',
+          title: 'Put this file back in the queue',
+          onclick: function () {
+            api('POST', '/api/files/' + file.id + '/retry').then(function () { refresh(); }, report);
+          }
+        })]);
+      }
       if (file.status === 'failed' && !needsAttention) {
+        add(actions, [el('button', {
+          type: 'button', class: 'small', text: 'Ignore', 'data-focus': 'ignore',
+          title: 'Keep this file as it is, and skip it unless a new copy replaces it',
+          onclick: function () {
+            api('POST', '/api/files/' + file.id + '/ignore').then(function () { refresh(); }, report);
+          }
+        })]);
         add(actions, [el('button', {
           type: 'button', class: 'small danger', text: 'Delete file', 'data-focus': 'delete',
           onclick: function () {

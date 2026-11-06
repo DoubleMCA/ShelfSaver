@@ -471,6 +471,18 @@ def test_offline_library_is_left_alone_and_other_libraries_continue(env):
     assert env.db.get_file(away.id).status == "queued"
 
 
+# ---- Ignored files ----
+
+def test_try_again_brings_back_an_ignored_file_but_not_another_skip(env):
+    row = env.queue_video()
+    env.db.set_file_status(row.id, "skipped", "Ignored, left as is")
+    env.worker.retry(row.id)
+    assert env.status(row.id) == "queued"
+    env.db.set_file_status(row.id, "skipped", "Already x265")
+    env.worker.retry(row.id)
+    assert env.status(row.id) == "skipped"
+
+
 # ---- The three-failure breaker ----
 
 def test_three_failures_with_a_working_card_fail_only_those_files(env):

@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 from .decide import decide
 from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
-from .models import RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
+from .models import IGNORED_REASON, RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import UNREADABLE, ProbeError, file_details, probe
 from .swap import (
     FileInUse,
@@ -284,7 +284,8 @@ class Worker:
                 self._swap_retry_asked.update(held)
             return
         file = self.db.get_file(file_id)
-        if file is not None and file.status in ("failed", "waiting_in_use"):
+        if file is not None and (file.status in ("failed", "waiting_in_use")
+                                 or file.reason == IGNORED_REASON):
             with self._lock:
                 self._next_locked_try.pop(file_id, None)
             self.db.requeue([file_id])

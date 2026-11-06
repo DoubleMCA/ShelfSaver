@@ -11,6 +11,7 @@ import pytest
 from shelfsaver import swap
 from shelfsaver.config import Config
 from shelfsaver.db import Database
+from shelfsaver.models import IGNORED_REASON
 from shelfsaver.scanner import Scanner
 from tests.helpers import make_video
 
@@ -293,6 +294,29 @@ def test_level_change_reevaluates_skipped_not_converted(env):
     env.db.update_library(env.lib.id, level="low")
     env.scanner.reevaluate(env.lib.id)
     assert env.db.get_file(row.id).status == "converted"
+
+
+def ignored(env, path):
+    st = os.stat(path)
+    return env.db.upsert_file(env.lib.id, str(path), st.st_size, st.st_mtime, "skipped",
+                              IGNORED_REASON)
+
+
+def test_an_ignored_file_stays_ignored_through_a_scan_and_a_settings_change(env):
+    row = ignored(env, env.bloated())
+    env.scanner.scan_library(env.lib.id)
+    assert env.db.get_file(row.id).reason == IGNORED_REASON
+    env.scanner.reevaluate(env.lib.id)
+    after = env.db.get_file(row.id)
+    assert after.status == "skipped" and after.reason == IGNORED_REASON
+
+
+def test_a_new_copy_replacing_an_ignored_file_is_looked_at_again(env):
+    path = env.efficient("movie.mkv")
+    row = ignored(env, path)
+    env.bloated("movie.mkv")
+    env.scanner.scan_library(env.lib.id)
+    assert env.db.get_file(row.id).status == "queued"
 
 
 def test_reevaluate_requeues_a_skipped_file_that_is_now_worth_converting(env):

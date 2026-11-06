@@ -8,6 +8,7 @@ LIBRARY_STATUSES = ("ok", "offline")
 FILE_STATUSES = (
     "queued", "working", "converted", "skipped", "failed", "waiting_in_use", "missing",
 )
+IGNORED_REASON = "Ignored, left as is"  # a skip only the owner sets, and only a new copy ends
 RUN_STATES = (
     "running", "swapping", "waiting_in_use", "done", "failed", "not_worth_it", "interrupted",
 )

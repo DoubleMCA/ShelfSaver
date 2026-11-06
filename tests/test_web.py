@@ -137,7 +137,7 @@ def test_everything_requires_sign_in(client):
                         ("get", "/api/settings"), ("get", "/api/browse"),
                         ("post", "/api/pause"), ("post", "/api/holding/clear"),
                         ("post", "/api/files/1/retry"), ("post", "/api/files/1/resolve"),
-                        ("post", "/api/files/1/delete")]:
+                        ("post", "/api/files/1/delete"), ("post", "/api/files/1/ignore")]:
         assert getattr(client, method)(url).status_code == 401, url
 
 
@@ -1255,6 +1255,71 @@ def test_past_attempts_stay_in_conversion_history_after_deleting(authed, parts, 
     rows = authed.get("/api/history", params={"show": "conversions"}).json()
     assert [r["name"] for r in rows] == ["bad.mkv"]
     assert authed.get("/api/history", params={"show": "scans"}).json() == []
+
+
+# ---- ignoring a failed file
+
+IGNORED = "Ignored, left as is"
+
+
+def ignore_file(authed, row):
+    return authed.post(f"/api/files/{row.id}/ignore")
+
+
+def test_ignoring_a_failed_file_keeps_it_and_skips_it(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    assert ignore_file(authed, row).status_code == 200
+    after = db.get_file(row.id)
+    assert path.read_bytes() == b"damaged"
+    assert after.status == "skipped" and after.reason == IGNORED
+
+
+def test_only_failed_files_can_be_ignored(authed, parts, tmp_path):
+    db, *_ = parts
+    _, row = failed_file(db, make_folder(tmp_path, "tv"), status="queued")
+    assert ignore_file(authed, row).status_code == 400
+    assert db.get_file(row.id).status == "queued"
+    assert authed.post("/api/files/999/ignore").status_code == 404
+
+
+def test_a_file_with_unfinished_work_is_not_ignored(authed, parts, tmp_path):
+    db, *_ = parts
+    _, row = failed_file(db, make_folder(tmp_path, "tv"))
+    db.update_run(db.start_run(row.id, 7, "H.264", None, "why").id, state="swapping")
+    assert ignore_file(authed, row).status_code == 409
+    assert db.get_file(row.id).status == "failed"
+
+
+def test_a_new_copy_is_not_ignored_by_mistake(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    path.write_bytes(b"a fresh good copy of the episode")
+    assert ignore_file(authed, row).status_code == 409
+    assert db.get_file(row.id).status == "failed"
+
+
+def test_a_file_that_is_gone_is_not_ignored(authed, parts, tmp_path):
+    db, *_ = parts
+    path, row = failed_file(db, make_folder(tmp_path, "tv"))
+    path.unlink()
+    assert ignore_file(authed, row).status_code == 400
+    assert db.get_file(row.id).status == "failed"
+
+
+def test_an_ignored_file_can_be_brought_back(authed, parts, tmp_path):
+    db, worker, *_ = parts
+    _, row = failed_file(db, make_folder(tmp_path, "tv"))
+    assert authed.post(f"/api/files/{row.id}/retry").status_code == 200
+    db.set_file_status(row.id, "skipped", IGNORED)
+    assert authed.post(f"/api/files/{row.id}/retry").status_code == 200
+    db.set_file_status(row.id, "skipped", "Already x265")
+    assert authed.post(f"/api/files/{row.id}/retry").status_code == 400
+
+
+def test_the_page_offers_ignore_and_a_way_back(client):
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "/ignore" in app_js and "Stop ignoring" in app_js
 
 
 def test_the_page_warns_before_deleting(client):

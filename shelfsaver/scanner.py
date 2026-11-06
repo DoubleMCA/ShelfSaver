@@ -14,7 +14,7 @@ from typing import Callable, Optional
 
 from . import swap
 from .decide import decide
-from .models import FileRow, Library
+from .models import IGNORED_REASON, FileRow, Library
 from .probe import UNREADABLE, ProbeError, file_details, probe
 from .swap import ext_path
 
@@ -146,6 +146,9 @@ class Scanner:
             return
         nlink = st.st_nlink
         unchanged = row is not None and (row.size, row.mtime) == (st.st_size, st.st_mtime)
+        if unchanged and row.status == "skipped" and row.reason == IGNORED_REASON:
+            self._forget(path)
+            return
         if (unchanged and not force and row.status != "missing"
                 and not (row.status == "queued" and nlink > 1)):
             self._forget(path)
