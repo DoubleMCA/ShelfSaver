@@ -1112,6 +1112,7 @@ def test_history_shows_files_that_never_had_a_run(authed, parts, status, reason)
     assert row["was"] == {"size": 2_000_000_000, "format": "x265", "bitrate": None}
     assert row["now"] == {"size": None, "format": None, "bitrate": None}
     assert row["state"] is None and row["saved_bytes"] == 0
+    assert row["updated_at"] == db.get_file(f.id).updated_at  # shown as when it was scanned
     details = authed.get(f"/api/files/{f.id}").json()
     assert details["runs"] == [] and details["file"]["reason"] == reason
 

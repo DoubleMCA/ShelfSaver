@@ -530,6 +530,10 @@
       }
       if (row.status === 'skipped') {
         if (row.reason) add(grid, [field('Why it was skipped', row.reason, true)]);
+        // A run's row already shows when it finished, so this is only for files that never ran.
+        if (row.kind === 'file' && row.updated_at) {
+          add(grid, [field(row.reason === IGNORED_REASON ? 'Ignored' : 'Scanned', fmtDate(row.updated_at), true)]);
+        }
       } else if (why) {
         add(grid, [field('Why it was converted', why, true)]);
       }
