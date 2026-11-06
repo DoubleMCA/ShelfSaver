@@ -39,7 +39,8 @@ def _run_tool(args: list[str]) -> Optional[str]:
     """Run a tool with an argument list and a short timeout. None if it can't run."""
     try:
         done = subprocess.run(args, capture_output=True, text=True, timeout=PROBE_TIMEOUT,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace",
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError):
         return None
     return (done.stdout or "") if done.returncode == 0 else None

@@ -478,6 +478,16 @@ def test_history_uses_the_files_reason(authed, parts, tmp_path):
     assert row["status"] == "failed" and row["reason"] == "The conversion failed"
 
 
+def test_system_use_needs_sign_in(client):
+    assert client.get("/api/system").status_code == 401
+
+
+def test_system_use_reports_each_number(authed, monkeypatch):
+    monkeypatch.setattr(app_module.SystemUsage, "read",
+                        lambda self: {"cpu": 12, "gpu": None, "ram": 34})
+    assert authed.get("/api/system").json() == {"cpu": 12, "gpu": None, "ram": 34}
+
+
 def test_file_details_hides_internal_fields(authed, parts, tmp_path):
     db, *_ = parts
     lib, f, run = seed_run(db, tmp_path)

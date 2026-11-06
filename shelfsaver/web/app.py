@@ -28,6 +28,7 @@ from .. import swap
 from ..db import ensure_mcp_token
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 from ..models import IGNORED_REASON
+from ..system_usage import SystemUsage
 from ..worker import _format_name
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,12 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             "offline_libraries": [{"id": l.id, "name": l.name}
                                   for l in db.list_libraries() if l.status == "offline"],
         }
+
+    system_usage = SystemUsage()
+
+    @api.get("/system")
+    def system():
+        return system_usage.read()
 
     @api.post("/pause")
     def pause():

@@ -816,7 +816,19 @@
       }, function () { /* offline: the notice is already showing */ });
     }
 
+    function drawUse(use) {
+      ['cpu', 'gpu', 'ram'].forEach(function (name) {
+        var value = use[name];
+        byId('stat-' + name).textContent = value === null || value === undefined ? '–' : value + '%';
+      });
+    }
+
+    function refreshUse() {
+      return api('GET', '/api/system').then(drawUse, function () { drawUse({}); });
+    }
+
     every(refresh);
+    every(refreshUse);
   }
 
   // ---- The queue
