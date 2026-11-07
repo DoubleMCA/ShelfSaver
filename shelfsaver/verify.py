@@ -15,6 +15,9 @@ from .quality import MIN_SAVINGS
 CHECKS = ("length", "tracks", "smaller", "plays")
 STOP_POLL_SECONDS = 0.2
 STDERR_KEEP_BYTES = 8 * 1024  # the first errors, which are the ones that explain a failure
+# Repeated timestamps carried over from the original; the null output complains but every
+# frame still decodes, so this alone never fails a file.
+HARMLESS_TIMESTAMPS = b"non monotonically increasing dts to muxer"
 
 REASONS = {
     "length": "New file is a different length",
@@ -162,9 +165,11 @@ def _plays(output: Path, video_index: int, ffmpeg, should_stop: Callable[[], boo
 
     def drain():
         # Always keep reading so a chatty decode can never fill the pipe and block.
-        for chunk in iter(lambda: proc.stderr.read(4096), b""):
+        for line in iter(proc.stderr.readline, b""):
+            if HARMLESS_TIMESTAMPS in line:
+                continue
             if len(seen) < STDERR_KEEP_BYTES:
-                seen.extend(chunk)
+                seen.extend(line)
 
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
@@ -189,9 +194,9 @@ def _plays(output: Path, video_index: int, ffmpeg, should_stop: Callable[[], boo
         proc.stderr.close()
     if stopped:
         return None, ""
-    said = seen.decode("utf-8", "replace").strip()
-    if proc.returncode != 0 and not said:
-        said = f"FFmpeg stopped with exit code {proc.returncode}"
+    said = seen.decode("utf-8", "replace").replace("\r\n", "\n").strip()
+    if proc.returncode != 0:
+        said = "\n".join(filter(None, [said, f"FFmpeg stopped with exit code {proc.returncode}"]))
     return proc.returncode == 0 and not said, said
 
 

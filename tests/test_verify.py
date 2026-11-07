@@ -508,3 +508,48 @@ def test_how_far_short_a_source_can_be(tmp_path, monkeypatch, duration, span_end
     monkeypatch.setattr(v, "_plays", lambda *a, **k: (True, ""))
     r = verify_output(src, out.path, convert(), "ffmpeg", "ffprobe")
     assert (r.reason == CUT_SHORT) is cut_short and r.passed is not cut_short
+
+
+DTS = (b"[null @ 00000219d68eab00] Application provided invalid, non monotonically increasing"
+       b" dts to muxer in stream 0: %d >= %d\r\n")
+
+
+def _decode(monkeypatch, said: bytes, code: int, path="a.mkv"):
+    from shelfsaver import verify as v
+
+    class Finished:
+        returncode = code
+        stderr = io.BytesIO(said)
+
+        def poll(self):
+            return code
+
+        def wait(self, timeout=None):
+            return code
+
+    monkeypatch.setattr(v, "kill_with_app", lambda proc: None)
+    monkeypatch.setattr(v.subprocess, "Popen", lambda *a, **k: Finished())
+    return v._plays(path, 0, "ffmpeg", lambda: False)
+
+
+def test_repeated_timestamps_alone_still_pass(monkeypatch):
+    # A copied video stream can carry the original's duplicate timestamps; it still plays.
+    said = b"".join(DTS % (n, n) for n in range(47412, 49412))
+    assert _decode(monkeypatch, said, 0) == (True, "")
+
+
+def test_real_error_after_many_timestamp_warnings_is_kept(monkeypatch):
+    said = b"".join(DTS % (n, n) for n in range(2000)) + b"[hevc @ 01] Invalid NAL unit size\r\n"
+    plays, log = _decode(monkeypatch, said, 0)
+    assert plays is False and log == "[hevc @ 01] Invalid NAL unit size"
+
+
+def test_timestamp_warnings_with_a_bad_exit_still_fail(monkeypatch):
+    plays, log = _decode(monkeypatch, DTS % (5, 5), 1)
+    assert plays is False and log == "FFmpeg stopped with exit code 1"
+
+
+def test_failure_log_names_the_exit_code_after_the_errors(monkeypatch):
+    plays, log = _decode(monkeypatch, b"Error while decoding stream #0:0\r\n", 69)
+    assert plays is False
+    assert log == "Error while decoding stream #0:0\nFFmpeg stopped with exit code 69"
