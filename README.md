@@ -1,7 +1,7 @@
 # ShelfSaver
 
 ShelfSaver watches the video folders you choose and shrinks the files that are worth
-shrinking by converting them to x265 on your NVIDIA graphics card. It checks every new file
+shrinking by converting them to H.265 on your NVIDIA graphics card. It checks every new file
 (length, tracks, plays from start to finish, meaningfully smaller) before it replaces the
 original, and it never removes anything you did not agree to.
 

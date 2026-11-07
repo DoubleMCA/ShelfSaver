@@ -439,7 +439,7 @@ def seed_run(db, tmp_path, state="done", file_status="converted", reason=None):
     f = db.upsert_file(lib.id, str(tmp_path / "movies" / "Film.mkv"), 500, 1.0, file_status,
                        reason)
     run = db.start_run(f.id, 1000, "H.264", 4000, "Big and old")
-    db.update_run(run.id, state=state, now_size=500, now_format="x265", saved_bytes=500,
+    db.update_run(run.id, state=state, now_size=500, now_format="H.265", saved_bytes=500,
                   swap_json='{"original": "x"}', tracks_json='[{"kind": "audio"}]',
                   checks_json='{"length": true}', error="boom" if state == "failed" else None)
     return lib, f, run
@@ -454,7 +454,7 @@ def test_history_shape_has_was_now_saved(authed, parts, tmp_path):
     assert row["file_id"] == f.id and row["name"] == "Film.mkv"
     assert row["library"] == "Movies"
     assert row["was"] == {"size": 1000, "format": "H.264", "bitrate": 4000}
-    assert row["now"]["size"] == 500 and row["now"]["format"] == "x265"
+    assert row["now"]["size"] == 500 and row["now"]["format"] == "H.265"
     assert row["saved_bytes"] == 500 and row["status"] == "converted"
     assert "swap_json" not in row
     assert "now_path" in row
@@ -1143,7 +1143,7 @@ def file_only(db, lib, name, status, reason=None, when=None, codec="hevc"):
 
 
 @pytest.mark.parametrize("status,reason", [
-    ("skipped", "Already x265"), ("skipped", "Already small"), ("skipped", "Dolby Vision, left as is"),
+    ("skipped", "Already H.265"), ("skipped", "Already small"), ("skipped", "Dolby Vision, left as is"),
     ("skipped", "Linked to another copy"), ("failed", "Couldn't read this file"),
     ("waiting_in_use", "Waiting, file is in use"), ("missing", None)])
 def test_history_shows_files_that_never_had_a_run(authed, parts, status, reason):
@@ -1156,7 +1156,7 @@ def test_history_shows_files_that_never_had_a_run(authed, parts, status, reason)
     assert row["kind"] == "file" and row["id"] == f"file-{f.id}" and row["file_id"] == f.id
     assert row["name"] == "Film.mkv" and row["library"] == "Movies"
     assert row["status"] == status and row["reason"] == reason
-    assert row["was"] == {"size": 2_000_000_000, "format": "x265", "bitrate": None}
+    assert row["was"] == {"size": 2_000_000_000, "format": "H.265", "bitrate": None}
     assert row["now"] == {"size": None, "format": None, "bitrate": None}
     assert row["state"] is None and row["saved_bytes"] == 0
     assert row["updated_at"] == db.get_file(f.id).updated_at  # shown as when it was scanned
@@ -1187,9 +1187,9 @@ def test_history_sorts_and_pages_across_both_kinds(authed, parts):
         done = db.upsert_file(lib.id, f"library/run{number}.mkv", 500, 1.0, "converted")
         run = db.start_run(done.id, 1000, "H.264", None, "why")
         db.update_run(run.id, state="done", started_at=when - 50, finished_at=when)
-    file_only(db, lib, "newest.mkv", "skipped", "Already x265", 500.0)
+    file_only(db, lib, "newest.mkv", "skipped", "Already H.265", 500.0)
     file_only(db, lib, "middle.mkv", "failed", "Couldn't read this file", 300.0)
-    file_only(db, other, "elsewhere.mkv", "skipped", "Already x265", 100.0)
+    file_only(db, other, "elsewhere.mkv", "skipped", "Already H.265", 100.0)
 
     def names(**params):
         return [r["name"] for r in authed.get("/api/history", params=params).json()]
@@ -1208,7 +1208,7 @@ def test_history_filters_on_the_server_so_paging_can_reach_every_match(authed, p
     lib = db.add_library("Movies", "library", "medium", False)
     file_only(db, lib, "old-failure.mkv", "failed", "Couldn't read this file", 1.0)
     for number in range(5):
-        file_only(db, lib, f"s{number}.mkv", "skipped", "Already x265", 100.0 + number)
+        file_only(db, lib, f"s{number}.mkv", "skipped", "Already H.265", 100.0 + number)
     done = db.upsert_file(lib.id, "library/done.mkv", 500, 1.0, "converted")
     db.update_run(db.start_run(done.id, 1000, "H.264", None, "why").id, state="done",
                   finished_at=50.0)
@@ -1412,7 +1412,7 @@ def test_an_ignored_file_can_be_brought_back(authed, parts, tmp_path):
     assert authed.post(f"/api/files/{row.id}/retry").status_code == 200
     db.set_file_status(row.id, "skipped", IGNORED)
     assert authed.post(f"/api/files/{row.id}/retry").status_code == 200
-    db.set_file_status(row.id, "skipped", "Already x265")
+    db.set_file_status(row.id, "skipped", "Already H.265")
     assert authed.post(f"/api/files/{row.id}/retry").status_code == 400
 
 
@@ -1432,7 +1432,7 @@ def test_try_again_is_offered_for_a_scan_failure_but_not_a_skip(authed, parts):
     bad = file_only(db, lib, "bad.mkv", "failed", "Couldn't read this file", codec=None)
     assert authed.post(f"/api/files/{bad.id}/retry").status_code == 200
     assert worker.calls == [("retry", bad.id)]
-    skipped = file_only(db, lib, "fine.mkv", "skipped", "Already x265")
+    skipped = file_only(db, lib, "fine.mkv", "skipped", "Already H.265")
     assert authed.post(f"/api/files/{skipped.id}/retry").status_code == 400
 
 

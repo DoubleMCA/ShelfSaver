@@ -270,7 +270,7 @@ def test_success_records_the_outcome(env):
     assert run["state"] == "done" and run["finished_at"]
     assert run["was_size"] == len(env.original_bytes) and run["now_size"] == new_size
     assert run["saved_bytes"] == run["was_size"] - run["now_size"] > 0
-    assert (run["was_format"], run["now_format"]) == ("H.264", "x265")
+    assert (run["was_format"], run["now_format"]) == ("H.264", "H.265")
     assert run["now_path"] == row.path
     assert json.loads(run["checks_json"]) == {
         "length": True, "tracks": True, "smaller": True, "plays": True}
@@ -300,7 +300,7 @@ def test_decide_skip_records_reason_and_moves_on(env):
     f = env.queue(make_video(env.lib / "x265.mkv", seconds=2, size=SIZE, vcodec="libx265", crf=35))
     assert env.worker.process_one() is True
     row = env.db.get_file(f.id)
-    assert (row.status, row.reason) == ("skipped", "Already x265")
+    assert (row.status, row.reason) == ("skipped", "Already H.265")
     assert env.encodes == 0
     assert env.db.file_details(f.id)["runs"] == []
     assert env.lib_file.read_bytes() == env.original_bytes
@@ -583,7 +583,7 @@ def test_try_again_brings_back_an_ignored_file_but_not_another_skip(env):
     env.db.set_file_status(row.id, "skipped", "Ignored, left as is")
     env.worker.retry(row.id)
     assert env.status(row.id) == "queued"
-    env.db.set_file_status(row.id, "skipped", "Already x265")
+    env.db.set_file_status(row.id, "skipped", "Already H.265")
     env.worker.retry(row.id)
     assert env.status(row.id) == "skipped"
 

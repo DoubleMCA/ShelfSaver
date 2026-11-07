@@ -85,7 +85,7 @@ CHANGED_NOTE = "The original changed during the conversion, so it will start aga
 DRIVE_OFFLINE_NOTE = "The library drive went offline, so this will start again once it is back"
 
 _FORMAT_NAMES = {
-    "h264": "H.264", "hevc": "x265", "mpeg2video": "MPEG-2", "mpeg1video": "MPEG-1",
+    "h264": "H.264", "hevc": "H.265", "mpeg2video": "MPEG-2", "mpeg1video": "MPEG-1",
     "mpeg4": "MPEG-4", "msmpeg4v3": "DivX", "vc1": "VC-1", "wmv3": "WMV", "av1": "AV1",
     "vp8": "VP8", "vp9": "VP9",
 }

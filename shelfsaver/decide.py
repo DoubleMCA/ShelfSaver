@@ -50,7 +50,7 @@ def decide(info: MediaInfo, level: str, english_only: bool,
 
     skip = None
     if info.video_codec == "hevc":
-        skip = ("Already x265", _EFFICIENT_WHY)
+        skip = ("Already H.265", _EFFICIENT_WHY)
     elif info.video_codec in ("av1", "vp9"):
         skip = ("Already an efficient format", _EFFICIENT_WHY)
     else:

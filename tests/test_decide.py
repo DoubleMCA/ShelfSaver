@@ -6,7 +6,7 @@ from shelfsaver.quality import LEVELS, MIN_SAVINGS, resolution_bucket
 from tests.helpers import audio, eng_spa, info
 
 
-@pytest.mark.parametrize("codec,reason", [("hevc", "Already x265"), ("av1", "Already an efficient format")])
+@pytest.mark.parametrize("codec,reason", [("hevc", "Already H.265"), ("av1", "Already an efficient format")])
 def test_efficient_formats_skip(codec, reason):
     assert decide(info(video_codec=codec), "medium", False).reason == reason
 
@@ -97,7 +97,7 @@ def test_unreadable_subtitle_skips_a_soundtrack_removal():
 
 def test_unreadable_subtitle_keeps_the_usual_reason_when_nothing_would_be_done():
     d = decide(info(video_codec="hevc", streams=_with_subtitle(None)), "medium", False)
-    assert d.action == "skip" and d.reason == "Already x265"
+    assert d.action == "skip" and d.reason == "Already H.265"
 
 
 def test_removes_non_english():

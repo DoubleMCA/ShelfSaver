@@ -90,7 +90,7 @@ def test_scan_queues_bloated_and_skips_x265(env):
     assert env.status(big) == "queued"
     assert env.row(big).codec == "h264"
     assert env.status(small) == "skipped"
-    assert env.reason(small) == "Already x265"
+    assert env.reason(small) == "Already H.265"
 
 
 def test_scan_ignores_work_root_when_library_is_a_drive_root(env, monkeypatch):
