@@ -526,7 +526,7 @@ class Worker:
             info_stat = os.stat(ext_path(file.path))
         except FileNotFoundError:
             logger.info("No longer there: %s", file.path)
-            self.db.set_file_status(file.id, "missing")
+            self.db.set_missing_unless_owned(file.id)
             return True
         except PermissionError:
             self._wait_for_lock(file.id, file.path)

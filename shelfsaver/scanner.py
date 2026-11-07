@@ -157,6 +157,11 @@ class Scanner:
         skipped_wait = not unchanged and full_scan and self._can_skip_wait(path, st)
         if not unchanged and not skipped_wait and not self._stable(path, st.st_size, st.st_mtime):
             raise _TryAgain(path)
+        if row is None:
+            row = self._follow_rename(library, path, st)
+            if row is not None and row.status != "missing":
+                self._forget(path)
+                return
         try:
             with open(ext_path(path), "rb") as reader:
                 reader.read(4096)
@@ -206,6 +211,21 @@ class Scanner:
             self._write(row, library, path, st, "queued", None, **details)
         self._forget(path)
 
+    def _follow_rename(self, library: Library, path: str, st) -> Optional[FileRow]:
+        """The row of a known file that now has this name, moved over to it, or None.
+
+        A rename keeps a file's size and time, so one match whose old name is gone is that file.
+        More than one could be any of them, so the file then counts as new.
+        """
+        matches = [r for r in self.db.files_with_size_and_time(library.id, st.st_size, st.st_mtime)
+                   if _norm(r.path) == _norm(path) or not os.path.lexists(ext_path(r.path))]
+        if len(matches) != 1 or self._owned(matches[0]):
+            return None
+        moved = self.db.follow_rename(matches[0].id, path)
+        if moved is not None:
+            logger.info("Renamed: %s is now %s", matches[0].path, path)
+        return moved
+
     def _write(self, row, library, path, st, status, reason, **details) -> None:
         self.db.upsert_file_unless_owned(library.id, path, st.st_size, st.st_mtime, status,
                                          reason, **details)
@@ -220,8 +240,9 @@ class Scanner:
                 st = os.stat(ext_path(path))
             except FileNotFoundError:
                 self._forget(path)
-                if (row is not None and row.status != "missing" and not self._owned(row)
-                        and self._reachable(library)):
+                # A row with another path was renamed after the caller looked it up.
+                if (row is not None and row.path == path and row.status != "missing"
+                        and not self._owned(row) and self._reachable(library)):
                     self.db.set_missing_unless_owned(row.id)
                 return True
             except PermissionError:
@@ -320,6 +341,8 @@ class Scanner:
         for key, row in rows.items():
             if key in found or row.status == "missing" or self._owned(row):
                 continue
+            if self.db.get_file_by_path(row.path) is None:
+                continue  # renamed during this scan, so its row now belongs to the new name
             # Confirm it is really gone, and that the owner has not just picked it up.
             if os.path.lexists(ext_path(row.path)):
                 continue

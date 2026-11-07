@@ -280,3 +280,51 @@ def test_timeline_shows_a_file_with_a_run_only_as_its_run(db, lib):
     run = db.start_run(f.id, 1, "H.264", None, "why")
     assert [(i["kind"], i["id"], i["status"]) for i in db.timeline()] == [
         ("run", run.id, "skipped")]
+
+
+def test_going_missing_remembers_the_status_for_a_rename(db):
+    lib = db.add_library("Movies", "D:\\Movies", "medium", False)
+    row = db.upsert_file(lib.id, "D:\\Movies\\a.mkv", 5, 1.5, "failed", "Why")
+    assert db.set_missing_unless_owned(row.id)
+    assert (db.get_file(row.id).status, db.get_file(row.id).reason) == ("missing", None)
+    moved = db.follow_rename(row.id, "D:\\Movies\\b.mkv")
+    assert (moved.path, moved.status, moved.reason) == ("D:\\Movies\\b.mkv", "failed", "Why")
+
+
+def test_a_rename_of_a_file_that_is_not_missing_leaves_its_status(db):
+    lib = db.add_library("Movies", "D:\\Movies", "medium", False)
+    row = db.upsert_file(lib.id, "D:\\Movies\\a.mkv", 5, 1.5, "converted")
+    moved = db.follow_rename(row.id, "D:\\Movies\\b.mkv")
+    assert (moved.path, moved.status) == ("D:\\Movies\\b.mkv", "converted")
+
+
+def test_a_rename_is_refused_while_the_worker_owns_the_file(db):
+    lib = db.add_library("Movies", "D:\\Movies", "medium", False)
+    row = db.upsert_file(lib.id, "D:\\Movies\\a.mkv", 5, 1.5, "working")
+    assert db.follow_rename(row.id, "D:\\Movies\\b.mkv") is None
+    assert db.get_file(row.id).path == "D:\\Movies\\a.mkv"
+
+
+def test_files_are_found_by_size_and_time_within_one_library(db):
+    one = db.add_library("One", "D:\\One", "medium", False)
+    two = db.add_library("Two", "D:\\Two", "medium", False)
+    wanted = db.upsert_file(one.id, "D:\\One\\a.mkv", 5, 1.5, "queued")
+    db.upsert_file(one.id, "D:\\One\\b.mkv", 6, 1.5, "queued")
+    db.upsert_file(one.id, "D:\\One\\c.mkv", 5, 2.5, "queued")
+    db.upsert_file(two.id, "D:\\Two\\a.mkv", 5, 1.5, "queued")
+    assert [r.id for r in db.files_with_size_and_time(one.id, 5, 1.5)] == [wanted.id]
+
+
+def test_an_older_database_gains_the_remembered_status_columns(tmp_path):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA.replace("was_status TEXT,", "").replace("was_reason TEXT,", ""))
+    conn.execute("INSERT INTO files(library_id, path, size, mtime, status, updated_at)"
+                 " VALUES (1, 'D:\\a.mkv', 5, 1.5, 'missing', 1.0)")
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    moved = db.follow_rename(1, "D:\\b.mkv")
+    assert (moved.path, moved.status) == ("D:\\b.mkv", "missing")
+    db.close()
+    assert Database(path).get_file(1).path == "D:\\b.mkv"

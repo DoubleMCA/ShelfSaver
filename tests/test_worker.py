@@ -542,6 +542,13 @@ def test_missing_file_becomes_missing_when_the_library_is_there(env):
     assert env.status(f.id) == "missing"
 
 
+def test_a_file_the_worker_finds_gone_can_still_be_followed_to_its_new_name(env):
+    f = env.queue_video()
+    env.lib_file.unlink()
+    env.worker.process_one()
+    assert env.db.follow_rename(f.id, str(env.lib / "new name.mkv")).status == "queued"
+
+
 def test_unreadable_file_fails_with_a_plain_reason(env):
     path = env.lib / "broken.mkv"
     path.write_bytes(b"not a video")

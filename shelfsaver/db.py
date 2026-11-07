@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS files (
     codec TEXT,
     container TEXT,
     resolution TEXT,
+    was_status TEXT,
+    was_reason TEXT,
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status, size);
@@ -128,6 +130,10 @@ class Database:
         columns = {row["name"] for row in self._query("PRAGMA table_info(runs)")}
         if "convert_seconds" not in columns:
             self._exec("ALTER TABLE runs ADD COLUMN convert_seconds REAL")
+        columns = {row["name"] for row in self._query("PRAGMA table_info(files)")}
+        for column in ("was_status", "was_reason"):
+            if column not in columns:
+                self._exec(f"ALTER TABLE files ADD COLUMN {column} TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -293,10 +299,37 @@ class Database:
         self._exec("DELETE FROM files WHERE id=?", (id,))
 
     def set_missing_unless_owned(self, id: int) -> bool:
+        """Mark a file missing, remembering its status in case it was only renamed."""
         cur = self._exec(
-            "UPDATE files SET status='missing', reason=NULL, updated_at=? WHERE id=? AND "
-            + NOT_OWNED, (time.time(), id))
+            "UPDATE files SET was_status=status, was_reason=reason, status='missing',"
+            " reason=NULL, updated_at=? WHERE id=? AND " + NOT_OWNED, (time.time(), id))
         return cur.rowcount > 0
+
+    def files_with_size_and_time(self, library_id: int, size: int, mtime: float) -> list[FileRow]:
+        rows = self._query("SELECT * FROM files WHERE library_id=? AND size=? AND mtime=?",
+                           (library_id, size, mtime))
+        return [_file(row) for row in rows]
+
+    def follow_rename(self, id: int, path: str) -> Optional[FileRow]:
+        """Give a file its new name and bring its history along. A file marked missing gets its
+        remembered status back, if it has one. None if the worker owns the file."""
+        conn = self._conn()
+        with conn:
+            cur = conn.execute(
+                "UPDATE files SET path=?,"
+                " reason=CASE WHEN status='missing' AND was_status IS NOT NULL"
+                " THEN was_reason ELSE reason END,"
+                " status=CASE WHEN status='missing' AND was_status IS NOT NULL"
+                " THEN was_status ELSE status END,"
+                " was_status=NULL, was_reason=NULL, updated_at=? WHERE id=? AND " + NOT_OWNED,
+                (path, time.time(), id))
+            if cur.rowcount == 0:
+                return None
+            conn.execute(
+                "UPDATE runs SET file_path=?,"
+                " now_path=CASE WHEN now_path IS NULL THEN NULL ELSE ? END WHERE file_id=?",
+                (path, path, id))
+        return self.get_file(id)
 
     def claim_file(
         self, id: int, expected_size: int, expected_mtime: float, size: int, mtime: float,

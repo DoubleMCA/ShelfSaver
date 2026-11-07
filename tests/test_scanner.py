@@ -520,3 +520,151 @@ def test_a_stopped_scan_leaves_nothing_counted(clock_env, monkeypatch):
     monkeypatch.setattr(clock_env.scanner, "_consider", stop_after_one)
     clock_env.scanner.scan_library(clock_env.lib.id)
     assert clock_env.scanner.status() == {"scanning": False, "pending": 0}
+
+
+# ---- renamed files
+
+def renamed(env, old, new="renamed.mkv"):
+    target = env.root / new
+    os.rename(old, target)
+    return target
+
+
+def scanned_file(env, status, reason=None):
+    """A real file with a row in this state, as if it had been through the app."""
+    path = env.efficient("known.mkv")
+    st = os.stat(path)
+    return path, env.db.upsert_file(env.lib.id, str(path), st.st_size, st.st_mtime, status, reason)
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("converted", None),
+    ("skipped", IGNORED_REASON),
+    ("failed", "New file failed the playback check"),
+    ("queued", None),
+])
+def test_a_rename_keeps_the_files_record(env, status, reason):
+    path, row = scanned_file(env, status, reason)
+    new = renamed(env, path)
+    env.scanner.scan_library(env.lib.id)
+    moved = env.db.get_file(row.id)
+    assert (moved.path, moved.status, moved.reason) == (str(new), status, reason)
+    assert env.row(path) is None
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("skipped", IGNORED_REASON),
+    ("failed", "New file failed the playback check"),
+])
+def test_a_file_already_marked_missing_gets_its_status_back(env, status, reason):
+    path, row = scanned_file(env, status, reason)
+    new = renamed(env, path)
+    env.scanner._process(env.lib, str(path))  # the watcher can reach the old name first
+    assert env.db.get_file(row.id).status == "missing"
+    env.scanner._process(env.lib, str(new))
+    moved = env.db.get_file(row.id)
+    assert (moved.path, moved.status, moved.reason) == (str(new), status, reason)
+
+
+def test_a_rename_found_by_a_full_scan_is_not_marked_missing_afterwards(env):
+    new = renamed(env, env.f.path)
+    env.scanner.scan_library(env.lib.id)
+    moved = env.db.get_file(env.f.id)
+    assert (moved.path, moved.status) == (str(new), "queued")
+
+
+def test_a_recheck_working_from_the_old_name_does_not_mark_a_renamed_file_missing(env):
+    path, row = scanned_file(env, "converted")
+    new = renamed(env, path)
+    env.scanner._process(env.lib, str(new))
+    env.scanner._process(env.lib, str(path), env.db.get_file(row.id), force=True)
+    assert env.db.get_file(row.id).status == "converted"
+
+
+def test_a_file_missing_from_before_this_was_tracked_is_decided_again(env):
+    env.db.set_file_status(env.f.id, "missing")
+    new = renamed(env, env.f.path)
+    env.scanner.scan_library(env.lib.id)
+    moved = env.db.get_file(env.f.id)
+    assert (moved.path, moved.status) == (str(new), "queued")
+
+
+def test_a_rename_brings_the_files_history_along(env):
+    path, row = scanned_file(env, "converted")
+    run = env.db.start_run(row.id, 10, "H.264", None, "why")
+    env.db.update_run(run.id, state="done", now_path=str(path))
+    new = renamed(env, path)
+    env.scanner.scan_library(env.lib.id)
+    record = env.db.run_record(run.id)
+    assert record["file_id"] == row.id
+    assert (record["file_path"], record["now_path"]) == (str(new), str(new))
+
+
+def test_changing_only_the_case_of_a_name_keeps_one_record(env):
+    path, row = scanned_file(env, "failed", "Why")
+    new = renamed(env, path, "KNOWN.mkv")
+    env.scanner.scan_library(env.lib.id)
+    assert env.db.get_file(row.id).path == str(new)
+    assert len(env.db.files_in_library(env.lib.id)) == 2  # this file and the seed
+
+
+def test_a_copy_is_a_new_file_while_the_original_is_still_there(env):
+    path, row = scanned_file(env, "failed", "Why")
+    copy = env.root / "copy.mkv"
+    shutil.copy2(path, copy)
+    env.scanner.scan_library(env.lib.id)
+    assert env.db.get_file(row.id).path == str(path)
+    assert env.row(copy).id != row.id
+
+
+def test_two_possible_matches_mean_a_new_file(env):
+    first, row1 = scanned_file(env, "failed", "One")
+    st = os.stat(first)
+    second = env.root / "second.mkv"
+    shutil.copy2(first, second)
+    row2 = env.db.upsert_file(env.lib.id, str(second), st.st_size, st.st_mtime, "failed", "Two")
+    new = renamed(env, first)
+    os.remove(second)
+    env.scanner.scan_library(env.lib.id)
+    assert env.row(new).id not in (row1.id, row2.id)
+
+
+def test_a_changed_file_under_a_new_name_is_a_new_file(env):
+    path, row = scanned_file(env, "failed", "Why")
+    new = env.root / "renamed.mkv"
+    os.rename(path, new)
+    with open(new, "ab") as extra:
+        extra.write(b"more")
+    env.scanner.scan_library(env.lib.id)
+    assert env.row(new).id != row.id
+    assert env.db.get_file(row.id).status == "missing"
+
+
+def test_a_file_the_worker_owns_is_not_moved(env):
+    path, row = scanned_file(env, "working")
+    new = renamed(env, path)
+    env.scanner.scan_library(env.lib.id)
+    assert env.db.get_file(row.id).path == str(path)
+    assert env.row(new).id != row.id
+
+
+def test_a_match_in_another_library_does_not_count(env):
+    other_root = env.volume / "TV"
+    other_root.mkdir()
+    other = env.db.add_library("TV", str(other_root), "high", False)
+    path, row = scanned_file(env, "failed", "Why")
+    new = other_root / "moved.mkv"
+    os.rename(path, new)
+    env.scanner.scan_library(other.id)
+    assert env.row(new).id != row.id
+
+
+def test_a_renamed_file_still_waits_to_settle(clock_env):
+    env = clock_env
+    path, row = scanned_file(env, "failed", "Why")
+    new = renamed(env, path)
+    assert env.scanner._process(env.lib, str(new)) is False
+    assert env.db.get_file(row.id).path == str(path)
+    env.clock.advance(61)
+    assert env.scanner._process(env.lib, str(new)) is True
+    assert env.db.get_file(row.id).path == str(new)
