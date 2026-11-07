@@ -172,3 +172,36 @@ def test_english_with_a_region_counts_as_english(lang):
 @pytest.mark.parametrize("lang", ["end", "enm", "ena-US"])
 def test_tags_that_only_start_like_english_are_not_english(lang):
     assert audio_to_remove(audio(("eng", None, True), (lang, None, False))) == (2,)
+
+
+def test_removes_everything_but_the_chosen_language():
+    tracks = audio(("spa", None, True), ("eng", None, False), ("jpn", None, False))
+    assert audio_to_remove(tracks, "spa") == (2, 3)
+
+
+def test_keeps_all_when_first_track_is_not_the_chosen_language():
+    assert audio_to_remove(audio(("eng", None, True), ("spa", None, False)), "spa") == ()
+
+
+def test_keeps_all_when_default_track_is_not_the_chosen_language():
+    assert audio_to_remove(audio(("spa", None, False), ("eng", None, True)), "spa") == ()
+
+
+def test_keeps_all_when_the_chosen_language_is_missing():
+    assert audio_to_remove(audio(("eng", None, True), ("fre", None, False)), "jpn") == ()
+
+
+def test_a_dubbed_movie_keeps_all_whichever_language_is_chosen():
+    assert audio_to_remove(audio(("spa", None, True), ("eng", "Dub", False)), "spa") == ()
+
+
+def test_the_chosen_language_counts_under_its_other_tags():
+    assert audio_to_remove(audio(("fre", None, True), ("fra", None, False), ("eng", None, False)),
+                           "fra") == (3,)
+
+
+def test_decide_uses_the_chosen_language():
+    tracks = audio(("spa", None, True), ("eng", None, False))
+    d = decide(info(video_codec="hevc", streams=tracks), "medium", True, language="spa")
+    assert d.action == "strip_only" and d.remove_audio == (2,)
+    assert decide(info(video_codec="hevc", streams=tracks), "medium", True).action == "skip"

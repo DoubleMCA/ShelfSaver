@@ -141,7 +141,7 @@ button:disabled { opacity: 0.55; cursor: default; }
 
 label.field { display: block; font-weight: 700; margin-bottom: 6px; }
 .field-row { margin-bottom: 18px; }
-input[type="text"], input[type="password"] {
+input[type="text"], input[type="password"], select {
   font: inherit;
   width: 100%;
   background: var(--field);

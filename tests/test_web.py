@@ -511,6 +511,53 @@ def test_blackouts_need_sign_in(client):
     assert r.status_code == 401
 
 
+def test_the_default_language_starts_as_english(authed):
+    body = authed.get("/api/settings").json()
+    assert body["default_language"] == "eng"
+    assert {"code": "eng", "name": "English"} in body["languages"]
+    assert body["language_name"] == "English"
+
+
+def test_the_default_language_can_be_changed(authed):
+    r = authed.patch("/api/settings", json={"default_language": "spa"})
+    assert r.status_code == 200
+    assert r.json()["default_language"] == "spa" and r.json()["language_name"] == "Spanish"
+    assert authed.get("/api/settings").json()["default_language"] == "spa"
+
+
+def test_an_unlisted_default_language_is_refused_with_a_reason(authed):
+    r = authed.patch("/api/settings", json={"default_language": "klingon"})
+    assert r.status_code == 400 and "Choose a language" in r.json()["detail"]
+    assert authed.get("/api/settings").json()["default_language"] == "eng"
+
+
+def test_changing_the_language_rechecks_only_libraries_that_remove_tracks(authed, parts, tmp_path):
+    _, _, scanner, _ = parts
+    off = add_library(authed, make_folder(tmp_path, "movies")).json()
+    scanner.wait()
+    on = add_library(authed, make_folder(tmp_path, "tv"), name="TV", english_only=True).json()
+    scanner.wait()
+    time.sleep(0.1)
+    scanner.calls.clear()
+    assert authed.get("/api/settings").json()["language_libraries"] == ["TV"]
+    authed.patch("/api/settings", json={"default_language": "spa"})
+    scanner.wait()
+    time.sleep(0.1)
+    assert ("reevaluate", on["id"]) in scanner.calls
+    assert ("reevaluate", off["id"]) not in scanner.calls
+
+
+def test_saving_the_same_language_rechecks_nothing(authed, parts, tmp_path):
+    _, _, scanner, _ = parts
+    add_library(authed, make_folder(tmp_path, "tv"), name="TV", english_only=True)
+    scanner.wait()
+    time.sleep(0.1)
+    scanner.calls.clear()
+    authed.patch("/api/settings", json={"default_language": "eng"})
+    time.sleep(0.1)
+    assert scanner.calls == []
+
+
 def test_system_use_needs_sign_in(client):
     assert client.get("/api/system").status_code == 401
 

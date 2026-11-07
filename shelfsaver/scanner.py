@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 from . import swap
 from .decide import decide
+from .languages import load_language
 from .models import IGNORED_REASON, FileRow, Library
 from .probe import UNREADABLE, ProbeError, file_details, probe
 from .swap import ext_path
@@ -187,7 +188,8 @@ class Scanner:
 
         decision = decide(info, library.level, library.english_only, nlink=nlink,
                           read_only=bool(getattr(st, "st_file_attributes", 0)
-                                         & READ_ONLY_ATTRIBUTE))
+                                         & READ_ONLY_ATTRIBUTE),
+                          language=load_language(self.db.get_setting("default_language")))
         details = file_details(info)
         if row is not None and row.status == "converted":
             # Never converted twice; only the extra-language audio can still be removed. A changed
@@ -355,7 +357,7 @@ class Scanner:
                     self._pending.discard(path)
 
     def reevaluate(self, library_id: int) -> None:
-        """Decide again after a library's level or English-only setting changed."""
+        """Decide again after a library's level, its track removal or the language changed."""
         library = next((l for l in self.db.list_libraries() if l.id == library_id), None)
         if library is None or not self._reachable(library):
             return
@@ -365,7 +367,7 @@ class Scanner:
             if self._stopping():
                 return
             if row.status == "converted" and not library.english_only:
-                continue  # nothing can change for a converted file without English-only
+                continue  # nothing can change for a converted file without track removal
             if not self._process(library, row.path, self.db.get_file(row.id), force=True):
                 self._add_pending(row.path)
 

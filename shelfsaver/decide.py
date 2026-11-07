@@ -3,38 +3,29 @@ from __future__ import annotations
 
 import re
 
+from .languages import DEFAULT_LANGUAGE, is_language, primary_language
 from .models import Decision, MediaInfo
 from .quality import LEVELS, resolution_bucket
 
-_ENGLISH = {"eng", "en", "english"}
 _DUB = re.compile(r"\bdub(bed)?\b", re.IGNORECASE)
 
 _EFFICIENT_WHY = "Already stored in a modern, efficient format"
 
 
-def _primary_language(lang) -> str:
-    # Only the main part of the tag counts, so en-US and en_GB are English but enm is not.
-    return (lang or "").strip().lower().replace("_", "-").split("-")[0]
-
-
-def _is_english(lang) -> bool:
-    return _primary_language(lang) in _ENGLISH
-
-
-def audio_to_remove(streams) -> tuple:
-    """Stream indexes of non-English audio that are safe to drop; () when unsure."""
+def audio_to_remove(streams, language: str = DEFAULT_LANGUAGE) -> tuple:
+    """Stream indexes of audio in other languages that are safe to drop; () when unsure."""
     audio = [s for s in streams if s.kind == "audio"]
     if len(audio) < 2:
         return ()
-    if any(_primary_language(s.language) in ("", "und") for s in audio):
+    if any(primary_language(s.language) in ("", "und") for s in audio):
         return ()
     if any(s.title and _DUB.search(s.title) for s in audio):
         return ()
-    if not _is_english(audio[0].language):
+    if not is_language(audio[0].language, language):
         return ()
-    if any(s.is_default and not _is_english(s.language) for s in audio):
+    if any(s.is_default and not is_language(s.language, language) for s in audio):
         return ()
-    return tuple(s.index for s in audio if not _is_english(s.language))
+    return tuple(s.index for s in audio if not is_language(s.language, language))
 
 
 def _skip(reason: str, why: str) -> Decision:
@@ -42,7 +33,8 @@ def _skip(reason: str, why: str) -> Decision:
 
 
 def decide(info: MediaInfo, level: str, english_only: bool,
-           nlink: int = 1, read_only: bool = False) -> Decision:
+           nlink: int = 1, read_only: bool = False,
+           language: str = DEFAULT_LANGUAGE) -> Decision:
     if nlink > 1:
         return _skip("Linked to another copy",
                      "Another file shares this one's data, so changing it would affect both")
@@ -54,7 +46,7 @@ def decide(info: MediaInfo, level: str, english_only: bool,
         return _skip("Dolby Vision, left as is",
                      "Converting would lose the Dolby Vision picture")
 
-    removal = audio_to_remove(info.streams) if english_only else ()
+    removal = audio_to_remove(info.streams, language) if english_only else ()
 
     skip = None
     if info.video_codec == "hevc":

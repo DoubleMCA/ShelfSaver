@@ -25,6 +25,7 @@ from typing import Callable, Optional
 
 from .decide import decide
 from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
+from .languages import load_language
 from .models import IGNORED_REASON, RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import UNREADABLE, ProbeError, file_details, probe
 from .schedule import blackout_end, load_blackouts
@@ -547,7 +548,8 @@ class Worker:
 
         decision = decide(info, library.level, library.english_only,
                           nlink=info_stat.st_nlink,
-                          read_only=not info_stat.st_mode & stat.S_IWRITE)
+                          read_only=not info_stat.st_mode & stat.S_IWRITE,
+                          language=load_language(self.db.get_setting("default_language")))
         details = file_details(info)
         if decision.action == "skip":
             logger.info("Skipping %s: %s", file.path, decision.reason)

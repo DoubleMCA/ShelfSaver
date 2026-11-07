@@ -342,6 +342,18 @@ def test_english_only_strips_converted_file_with_extra_audio(env):
     assert env.db.get_file(row.id).status == "queued"
 
 
+def test_the_scanner_keeps_the_default_language_from_settings(env):
+    path = env.root / "multi.mkv"
+    make_video(path, seconds=2, size=SIZE, vcodec="libx265", crf=28,
+               audio=(("spa", "Spanish"), ("eng", "English")))
+    env.db.update_library(env.lib.id, english_only=True)
+    env.scanner.scan_library(env.lib.id)
+    assert env.status(path) == "skipped"  # Spanish comes first, so English can't be kept alone
+    env.db.set_setting("default_language", "spa")
+    env.scanner.reevaluate(env.lib.id)
+    assert env.status(path) == "queued"
+
+
 def test_hardlinked_file_is_skipped(env):
     a = env.bloated("a.mkv")
     b = env.root / "b.mkv"

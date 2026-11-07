@@ -124,7 +124,7 @@
     eng: 'English', spa: 'Spanish', fra: 'French', fre: 'French', deu: 'German', ger: 'German',
     ita: 'Italian', jpn: 'Japanese', por: 'Portuguese', rus: 'Russian', kor: 'Korean',
     zho: 'Chinese', chi: 'Chinese', hin: 'Hindi', ara: 'Arabic', nld: 'Dutch', dut: 'Dutch',
-    swe: 'Swedish', pol: 'Polish', tur: 'Turkish', und: 'Unknown language'
+    swe: 'Swedish', pol: 'Polish', tur: 'Turkish', ind: 'Indonesian', und: 'Unknown language'
   };
 
   function trackName(track) {
@@ -325,12 +325,16 @@
 
   function englishCheckbox(checked) {
     var box = el('input', { type: 'checkbox', id: 'english-only', checked: checked });
+    var label = el('span', { text: 'Keep the default language soundtracks only' });
+    api('GET', '/api/settings').then(function (settings) {
+      label.textContent = 'Keep ' + settings.language_name + ' soundtracks only';
+    }, function () {});
     return {
       input: box,
       row: el('div', { class: 'field-row' },
-        el('label', { class: 'check', for: 'english-only' }, box,
-          el('span', { text: 'Keep English soundtracks only' })),
-        el('p', { class: 'muted small', text: "Dubbed movies keep all their soundtracks. " +
+        el('label', { class: 'check', for: 'english-only' }, box, label),
+        el('p', { class: 'muted small', text: "The language comes from Settings. " +
+          "Dubbed movies keep all their soundtracks. " +
           "Removed soundtracks can't be recovered once the original is replaced." }))
     };
   }
@@ -1151,6 +1155,41 @@
       var schedule = el('div', { class: 'setting' });
       drawSchedule(schedule);
 
+      var languageNote = el('p', { class: 'small', role: 'status' });
+      var language = el('select', { id: 'default-language' }, data.languages.map(function (choice) {
+        return el('option', { value: choice.code, text: choice.name });
+      }));
+      language.value = data.default_language;
+      function saveLanguage() {
+        api('PATCH', '/api/settings', { default_language: language.value }).then(function (saved) {
+          data.default_language = saved.default_language;
+          languageNote.className = 'small ok';
+          languageNote.textContent = 'Saved. Libraries that remove soundtracks will keep ' + saved.language_name + '.';
+        }, function (problem) {
+          language.value = data.default_language;
+          languageNote.className = 'small err';
+          languageNote.textContent = messageOf(problem);
+        });
+      }
+      language.addEventListener('change', function () {
+        if (!data.language_libraries.length) { saveLanguage(); return; }
+        var name = language.options[language.selectedIndex].text;
+        confirmDialog({
+          title: 'Keep ' + name + ' soundtracks?',
+          lines: [
+            'These libraries remove soundtracks in other languages, so every file in them will be checked again: ' +
+              data.language_libraries.join(', ') + '.',
+            'Files where ' + name + ' is the first and default soundtrack can lose their other soundtracks. ' +
+              "Removed soundtracks can't be recovered once the original is replaced. " +
+              "Soundtracks that were already removed don't come back."
+          ],
+          confirmLabel: 'Change the language', danger: true
+        }).then(function (yes) {
+          if (yes) saveLanguage();
+          else language.value = data.default_language;
+        });
+      });
+
       fill(box,
         el('div', { class: 'setting' },
           el('h3', { text: 'Scratch disk' }),
@@ -1168,6 +1207,11 @@
           el('label', { class: 'check', for: 'holding' }, holdBox, el('span', { text: 'Hold originals after replacing them' })),
           el('p', { class: 'small', text: 'Held right now: ' + fmtSize(data.held_bytes) }),
           clearBtn, holdNote),
+        el('div', { class: 'setting' },
+          el('h3', { text: 'Default language' }),
+          el('p', { class: 'muted small', text: 'The soundtrack language to keep in libraries that remove the others. Libraries only remove soundtracks if you turn that on in their options.' }),
+          el('label', { class: 'field', for: 'default-language', text: 'Language' }),
+          language, languageNote),
         schedule);
 
       fill(trouble,

@@ -28,6 +28,7 @@ from .. import swap
 from ..db import ensure_mcp_token
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 from ..models import IGNORED_REASON
+from ..languages import clean_language, language_choices, language_name, load_language
 from ..schedule import clean_blackouts, load_blackouts
 from ..system_usage import SystemUsage
 from ..worker import _format_name
@@ -147,6 +148,7 @@ class SettingsPatch(BaseModel):
     scratch_dir: Optional[str] = None
     holding_enabled: Optional[StrictBool] = None
     blackouts: Optional[list[Any]] = None
+    default_language: Optional[str] = None
 
 
 # ---- path helpers
@@ -734,6 +736,10 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     # ---- settings and holding
 
+    def language_json() -> dict:
+        language = load_language(db.get_setting("default_language"))
+        return {"default_language": language, "language_name": language_name(language)}
+
     @api.get("/settings")
     def get_settings(request: Request):
         info = held_info()
@@ -747,6 +753,9 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             "scratch_dir": scratch_setting(),
             "holding_enabled": db.get_setting("holding_enabled") == "1",
             "blackouts": load_blackouts(db.get_setting("blackouts")),
+            **language_json(),
+            "languages": language_choices(),
+            "language_libraries": [l.name for l in db.list_libraries() if l.english_only],
             "held_bytes": info["held_bytes"],
             "held_libraries": info["held_libraries"],
             "held_drives": info["held_drives"],
@@ -760,6 +769,12 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         if body.blackouts is not None:
             try:
                 blackouts = clean_blackouts(body.blackouts)
+            except ValueError as exc:
+                raise _fail(400, str(exc))
+        language = None
+        if body.default_language is not None:
+            try:
+                language = clean_language(body.default_language)
             except ValueError as exc:
                 raise _fail(400, str(exc))
         if body.scratch_dir is not None:
@@ -781,9 +796,15 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             db.set_setting("holding_enabled", "1" if body.holding_enabled else "0")
         if blackouts is not None:
             db.set_setting("blackouts", json.dumps(blackouts))
+        if language is not None and language != language_json()["default_language"]:
+            db.set_setting("default_language", language)
+            affected = [l.id for l in db.list_libraries() if l.english_only]
+            _in_background("reevaluate", *[lambda library_id=library_id: scanner.reevaluate(library_id)
+                                           for library_id in affected])
         return {"scratch_dir": scratch_setting(),
                 "holding_enabled": db.get_setting("holding_enabled") == "1",
-                "blackouts": load_blackouts(db.get_setting("blackouts"))}
+                "blackouts": load_blackouts(db.get_setting("blackouts")),
+                **language_json()}
 
     @api.post("/holding/clear")
     def clear_holding(body: Optional[ConfirmBody] = None):

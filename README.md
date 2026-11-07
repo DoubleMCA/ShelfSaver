@@ -40,7 +40,8 @@ These show a fresh install with nothing converted yet, and the folder names are 
 - Builds new files on a scratch disk you choose, and swaps them in once they pass the checks.
 - Runs 24/7 unless you add blackout times, when no new files start.
 - Can keep replaced originals in a holding folder until you clear them.
-- Can remove non-English soundtracks, except on dubbed movies. This is off unless you turn it on.
+- Can remove soundtracks that aren't in your default language (English unless you change it),
+  except on dubbed movies. This is off unless you turn it on.
 - Offers logs and status over a read-only MCP connection.
 
 ## Install

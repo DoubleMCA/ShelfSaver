@@ -230,6 +230,19 @@ def test_end_to_end_strip_only_removes_spanish(env, monkeypatch):
     assert "eng" in [t["language"] for t in tracks["kept"]]
 
 
+def test_the_worker_keeps_the_default_language_from_settings(env):
+    env.db.update_library(env.library.id, english_only=True)
+    env.db.set_setting("default_language", "spa")
+    env.encode_output = dict(vcodec="libx265", crf=40, seconds=2, size=SIZE,
+                             audio=(("spa", "Spanish"),))
+    f = env.queue(make_video(env.lib / "two.mkv", seconds=2, size=SIZE, vcodec="libx265", crf=20,
+                             audio=(("spa", "Spanish"), ("eng", "English"))))
+    env.worker.process_one()
+    assert env.db.get_file(f.id).status == "converted"
+    tracks = json.loads(env.run_row()["tracks_json"])
+    assert [t["language"] for t in tracks["removed"]] == ["eng"]
+
+
 @pytest.mark.gpu
 def test_end_to_end_avi_becomes_mkv(env, monkeypatch):
     real_encoder(monkeypatch)
