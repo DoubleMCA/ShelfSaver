@@ -22,6 +22,7 @@ class Library:
     level: str
     english_only: bool
     status: str = "ok"
+    shrink_h265: bool = False
 
 
 @dataclass
@@ -100,6 +101,7 @@ class Decision:
     reason: str
     remove_audio: tuple = ()
     why: str = ""
+    sample_first: bool = False  # an H.265 file: convert only if a sample shows a big saving
 
 
 @dataclass(frozen=True)

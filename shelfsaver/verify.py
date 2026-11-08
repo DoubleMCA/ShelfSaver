@@ -10,7 +10,7 @@ from typing import Callable
 from .jobobject import kill_with_app
 from .models import Decision, MediaInfo, VerifyResult
 from .probe import ProbeError, ScanStopped, probe, scan_streams
-from .quality import MIN_SAVINGS
+from .quality import H265_MIN_SAVINGS, HDR_TRANSFERS, MIN_SAVINGS
 
 CHECKS = ("length", "tracks", "smaller", "plays")
 STOP_POLL_SECONDS = 0.2
@@ -26,7 +26,6 @@ REASONS = {
     "plays": "New file failed the playback check",
 }
 SOURCE_CUT_SHORT = "The original seems to be cut short, so it was left alone"
-HDR_TRANSFERS = ("smpte2084", "arib-std-b67")
 
 
 class _SourceCutShort(Exception):
@@ -146,8 +145,9 @@ def _stream_lengths_ok(source: MediaInfo, output: MediaInfo, out_path, decision,
     return True
 
 
-def _smaller_ok(source: MediaInfo, output: MediaInfo) -> bool:
-    return output.size <= source.size * (1 - MIN_SAVINGS)
+def _smaller_ok(source: MediaInfo, output: MediaInfo, decision: Decision) -> bool:
+    least = H265_MIN_SAVINGS if decision.sample_first else MIN_SAVINGS
+    return output.size <= source.size * (1 - least)
 
 
 def _plays(output: Path, video_index: int, ffmpeg, should_stop: Callable[[], bool]):
@@ -209,7 +209,7 @@ def verify_output(source: MediaInfo, output, decision: Decision, ffmpeg, ffprobe
         return VerifyResult(False, checks, "New file could not be read")
 
     checks["tracks"] = _tracks_ok(source, out, decision)
-    checks["smaller"] = _smaller_ok(source, out)
+    checks["smaller"] = _smaller_ok(source, out, decision)
 
     # Container duration is unreliable (a source that starts at a non-zero time reports
     # a longer duration), so length is judged from per-stream packet timing. It runs

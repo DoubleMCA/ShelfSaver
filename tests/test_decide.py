@@ -205,3 +205,59 @@ def test_decide_uses_the_chosen_language():
     d = decide(info(video_codec="hevc", streams=tracks), "medium", True, language="spa")
     assert d.action == "strip_only" and d.remove_audio == (2,)
     assert decide(info(video_codec="hevc", streams=tracks), "medium", True).action == "skip"
+
+
+# ---- Shrinking oversized H.265 files ----
+
+def _h265(**overrides):
+    fields = dict(video_codec="hevc", width=1920, video_bitrate=10_000_000)
+    fields.update(overrides)
+    return info(**fields)
+
+
+def test_oversized_h265_is_sampled_first_when_the_library_allows_it():
+    d = decide(_h265(), "medium", False, shrink_h265=True)
+    assert (d.action, d.reason, d.sample_first) == ("convert", "Worth converting", True)
+    assert d.why == "Already H.265, but uses far more data than it needs at this resolution"
+
+
+def test_oversized_h265_is_left_alone_when_the_library_does_not_allow_it():
+    d = decide(_h265(), "medium", False)
+    assert (d.action, d.reason, d.sample_first) == ("skip", "Already H.265", False)
+
+
+@pytest.mark.parametrize("overrides", [
+    dict(video_bitrate=5_000_000),            # under the medium 1080p limit
+    dict(video_bitrate=None),                 # unknown is never treated as oversized
+    dict(color_transfer="smpte2084"),         # HDR is left for now
+    dict(color_transfer="arib-std-b67"),
+])
+def test_h265_that_is_not_clearly_oversized_still_skips(overrides):
+    assert decide(_h265(**overrides), "medium", False, shrink_h265=True).reason == "Already H.265"
+
+
+def test_h265_that_already_showed_too_little_saving_is_not_sampled_again():
+    d = decide(_h265(), "medium", False, shrink_h265=True, tried="Sample showed too little saving")
+    assert (d.action, d.reason) == ("skip", "Sample showed too little saving")
+    d = decide(_h265(), "medium", False, shrink_h265=False, tried="Sample showed too little saving")
+    assert (d.action, d.reason) == ("skip", "Already H.265")
+
+
+def test_h265_that_showed_too_little_saving_still_loses_extra_audio():
+    d = decide(_h265(streams=eng_spa()), "medium", True, shrink_h265=True,
+               tried="Would not save enough")
+    assert (d.action, d.remove_audio, d.sample_first) == ("strip_only", (2,), False)
+
+
+def test_oversized_h265_keeps_its_extra_audio_removal():
+    d = decide(_h265(streams=eng_spa()), "medium", True, shrink_h265=True)
+    assert (d.action, d.remove_audio, d.sample_first) == ("convert", (2,), True)
+
+
+def test_dolby_vision_h265_is_never_sampled():
+    d = decide(_h265(dolby_vision=True), "medium", False, shrink_h265=True)
+    assert d.reason == "Dolby Vision, left as is"
+
+
+def test_h264_is_never_sampled_first():
+    assert decide(info(), "medium", False, shrink_h265=True).sample_first is False

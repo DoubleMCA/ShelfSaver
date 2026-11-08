@@ -668,3 +668,48 @@ def test_a_renamed_file_still_waits_to_settle(clock_env):
     env.clock.advance(61)
     assert env.scanner._process(env.lib, str(new)) is True
     assert env.db.get_file(row.id).path == str(new)
+
+
+# ---- Shrinking oversized H.265 files
+
+def bloated_h265(env, rel="fat.mkv"):
+    return make_video(env.root / rel, seconds=2, size=SIZE, vcodec="libx265", crf=1)
+
+
+def test_oversized_h265_is_queued_only_where_the_library_allows_it(env):
+    fat = bloated_h265(env)
+    env.scanner.scan_library(env.lib.id)
+    assert (env.status(fat), env.reason(fat)) == ("skipped", "Already H.265")
+    env.db.update_library(env.lib.id, shrink_h265=True)
+    env.scanner.reevaluate(env.lib.id)
+    assert env.status(fat) == "queued"
+    env.db.update_library(env.lib.id, shrink_h265=False)
+    env.scanner.reevaluate(env.lib.id)
+    assert (env.status(fat), env.reason(fat)) == ("skipped", "Already H.265")
+
+
+def test_lean_h265_stays_skipped_with_shrinking_on(env):
+    env.db.update_library(env.lib.id, shrink_h265=True)
+    lean = env.efficient()
+    env.scanner.scan_library(env.lib.id)
+    assert (env.status(lean), env.reason(lean)) == ("skipped", "Already H.265")
+
+
+@pytest.mark.parametrize("reason", ["Sample showed too little saving", "Would not save enough"])
+def test_h265_that_was_already_tried_is_not_queued_again(env, reason):
+    env.db.update_library(env.lib.id, shrink_h265=True)
+    fat = bloated_h265(env)
+    st = os.stat(fat)
+    env.db.upsert_file(env.lib.id, str(fat), st.st_size, st.st_mtime, "skipped", reason)
+    env.scanner.reevaluate(env.lib.id)
+    assert (env.status(fat), env.reason(fat)) == ("skipped", reason)
+
+
+def test_h265_the_app_made_is_never_queued_again(env):
+    env.db.update_library(env.lib.id, shrink_h265=True)
+    fat = bloated_h265(env)
+    st = os.stat(fat)
+    row = env.db.upsert_file(env.lib.id, str(fat), st.st_size, st.st_mtime, "converted")
+    env.scanner.reevaluate(env.lib.id)
+    env.scanner.scan_library(env.lib.id)
+    assert env.db.get_file(row.id).status == "converted"

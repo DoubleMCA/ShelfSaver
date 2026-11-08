@@ -23,11 +23,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from .decide import decide
+from .decide import SAMPLE_FAILED, SAMPLE_SHORT, STRIP_WHY, TRIED_REASONS, decide
 from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
 from .languages import load_language
 from .models import IGNORED_REASON, RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import UNREADABLE, ProbeError, file_details, probe
+from .quality import H265_MIN_SAVINGS
+from .sample import SampleError, predict_saving
 from .schedule import blackout_end, load_blackouts
 from .swap import (
     FileInUse,
@@ -133,6 +135,10 @@ class _Stopped(Exception):
 class _SourceLocked(Exception):
     """Another program won't let the file being copied be read. Not an `OSError`, so it can't
     be mistaken for trouble with the destination."""
+
+
+def _joined(*parts: str) -> str:
+    return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
 
 def _temp_stem(run_id: int, started_at: float) -> str:
@@ -549,7 +555,9 @@ class Worker:
         decision = decide(info, library.level, library.english_only,
                           nlink=info_stat.st_nlink,
                           read_only=not info_stat.st_mode & stat.S_IWRITE,
-                          language=load_language(self.db.get_setting("default_language")))
+                          language=load_language(self.db.get_setting("default_language")),
+                          shrink_h265=library.shrink_h265,
+                          tried=file.reason if file.reason in TRIED_REASONS else None)
         details = file_details(info)
         if decision.action == "skip":
             logger.info("Skipping %s: %s", file.path, decision.reason)
@@ -665,6 +673,8 @@ class Worker:
 
     def _convert_and_check(self, job: _Job) -> bool:
         os.makedirs(ext_path(job.scratch_folder), exist_ok=True)
+        if job.decision.sample_first and not self._sample_says_go(job):
+            return True
         source_copy = job.scratch_folder / f"source{job.info.ext}"
 
         self._begin_step(job, "Copying")
@@ -673,7 +683,9 @@ class Worker:
         except OSError as exc:
             logger.error("Could not copy %s to the scratch disk: %s", job.file.path, exc)
             raise _RunFailed("Couldn't copy this file to the scratch disk") from exc
+        return self._convert_copy(job, source_copy)
 
+    def _convert_copy(self, job: _Job, source_copy: Path) -> bool:
         self._begin_step(job, "Converting")
         cmd = build_command(job.info, job.decision, job.library.level, source_copy, job.output,
                             self.config.ffmpeg)
@@ -682,8 +694,8 @@ class Worker:
             result = run_ffmpeg(cmd, job.info.duration, self._on_progress, self._should_stop)
         except OSError as exc:
             result = EncodeResult(-1, False, f"FFmpeg could not start: {exc}")
-        job.log_tail = result.log_tail
-        self.db.update_run(job.run.id, log_tail=result.log_tail,
+        job.log_tail = _joined(job.log_tail, result.log_tail)
+        self.db.update_run(job.run.id, log_tail=job.log_tail,
                            convert_seconds=_now() - convert_began)
 
         out_info = None
@@ -715,10 +727,9 @@ class Worker:
             if verdict.reason == "Stopped":
                 raise _Stopped()
             if verdict.not_worth_it:
-                logger.info("Not worth replacing %s: %s", job.file.path, verdict.reason)
-                self._end_run(job.run.id, "not_worth_it", verdict.reason)
-                self.db.set_file_status(job.file.id, "skipped", verdict.reason)
-                self._delete_run_files(job)
+                if job.decision.sample_first and self._strip_instead(job):
+                    return self._convert_copy(job, source_copy)
+                self._not_worth_it(job, verdict.reason)
                 return True
             raise _RunFailed(verdict.reason)
 
@@ -728,6 +739,47 @@ class Worker:
             tracks_json=_tracks_json(job.info, job.decision),
         )
         return self._place_new_file(job)
+
+    def _sample_says_go(self, job: _Job) -> bool:
+        """Test a sample of an H.265 file. False when the run has ended here."""
+        self._begin_step(job, "Testing a sample")
+        try:
+            saving = predict_saving(job.info, job.library.level, ext_path(job.file.path),
+                                    Path(ext_path(job.scratch_folder / "sample")),
+                                    self.config.ffmpeg, self.config.ffprobe, self._should_stop)
+        except SampleError as exc:
+            self._add_to_log(job, f"{SAMPLE_FAILED}: {exc}")
+            if self._strip_instead(job):
+                return True
+            self._not_worth_it(job, SAMPLE_FAILED)
+            return False
+        if saving is None:
+            raise _Stopped()
+        change = f"{saving:.0%} smaller" if saving >= 0 else f"{-saving:.0%} bigger"
+        self._add_to_log(job, f"Sample: about {change}")
+        if saving >= H265_MIN_SAVINGS or self._strip_instead(job):
+            return True
+        self._not_worth_it(job, SAMPLE_SHORT)
+        return False
+
+    def _strip_instead(self, job: _Job) -> bool:
+        """Fall back to only removing extra-language audio, when there is any to remove."""
+        if not job.decision.remove_audio:
+            return False
+        logger.info("Only removing the extra audio from %s", job.file.path)
+        job.decision = Decision("strip_only", "Already H.265", job.decision.remove_audio, STRIP_WHY)
+        self.db.update_run(job.run.id, why=STRIP_WHY)
+        return True
+
+    def _add_to_log(self, job: _Job, text: str) -> None:
+        job.log_tail = _joined(job.log_tail, text)
+        self.db.update_run(job.run.id, log_tail=job.log_tail)
+
+    def _not_worth_it(self, job: _Job, reason: str) -> None:
+        logger.info("Not worth replacing %s: %s", job.file.path, reason)
+        self._end_run(job.run.id, "not_worth_it", reason)
+        self.db.set_file_status(job.file.id, "skipped", reason)
+        self._delete_run_files(job)
 
     def _encoder_failed(self, job: _Job, result: EncodeResult) -> None:
         if result.returncode == 0:

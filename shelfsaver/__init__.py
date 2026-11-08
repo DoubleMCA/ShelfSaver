@@ -1,3 +1,3 @@
 """ShelfSaver: keeps video libraries small by converting worthwhile files."""
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"

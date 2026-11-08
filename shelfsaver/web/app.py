@@ -136,12 +136,14 @@ class LibraryBody(BaseModel):
     path: str = ""
     level: str = ""
     english_only: StrictBool = False
+    shrink_h265: StrictBool = False
 
 
 class LibraryPatch(BaseModel):
     name: Optional[str] = None
     level: Optional[str] = None
     english_only: Optional[StrictBool] = None
+    shrink_h265: Optional[StrictBool] = None
 
 
 class SettingsPatch(BaseModel):
@@ -352,7 +354,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     def library_json(library) -> dict:
         return {"id": library.id, "name": library.name, "path": library.path,
                 "level": library.level, "english_only": library.english_only,
-                "status": library.status, "stats": db.stats(library.id)}
+                "shrink_h265": library.shrink_h265, "status": library.status, "stats": db.stats(library.id)}
 
     def busy_library_ids() -> set:
         busy = set()
@@ -670,7 +672,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         scratch = scratch_setting()
         if scratch and _overlaps(path, scratch):
             raise _fail(400, "That folder is the scratch disk folder or overlaps it.")
-        library = db.add_library(name, path, level, body.english_only)
+        library = db.add_library(name, path, level, body.english_only, body.shrink_h265)
         remember_volume(path)
         _in_background("scan", scanner.refresh_watches, lambda: scanner.scan_library(library.id))
         return library_json(library)
@@ -685,9 +687,15 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             fields["level"] = clean_level(body.level)
         if body.english_only is not None:
             fields["english_only"] = body.english_only
+        if body.shrink_h265 is not None:
+            fields["shrink_h265"] = body.shrink_h265
         db.update_library(library_id, **fields)
-        if (fields.get("level", library.level) != library.level
-                or fields.get("english_only", library.english_only) != library.english_only):
+        level_changed = fields.get("level", library.level) != library.level
+        if level_changed:
+            db.forget_saving_results(library_id)  # a new level gives a different saving
+        if (level_changed
+                or fields.get("english_only", library.english_only) != library.english_only
+                or fields.get("shrink_h265", library.shrink_h265) != library.shrink_h265):
             _in_background("reevaluate", lambda: scanner.reevaluate(library_id))
         return library_json(library_or_404(library_id))
 

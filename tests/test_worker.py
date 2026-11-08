@@ -1841,3 +1841,107 @@ def test_try_again_works_for_a_file_that_failed_at_scan_time(env):
     env.worker.retry(f.id)
     assert env.worker.process_one() is True
     assert env.db.get_file(f.id).status == "converted"
+
+
+# ---- Shrinking oversized H.265 files ----
+
+SAMPLE_SHORT = "Sample showed too little saving"
+
+
+def h265_library(env, english_only=False):
+    env.db.update_library(env.library.id, shrink_h265=True, english_only=english_only)
+
+
+def predicted(env, saving):
+    """Fake the sample test; records the files it was asked about."""
+    asked = []
+
+    def fake(info, level, source, folder, ffmpeg, ffprobe, should_stop):
+        asked.append(Path(source))
+        if isinstance(saving, Exception):
+            raise saving
+        return saving
+    env.monkeypatch.setattr(worker_module, "predict_saving", fake)
+    return asked
+
+
+def test_a_sample_that_saves_enough_leads_to_a_full_conversion(env):
+    h265_library(env)
+    asked = predicted(env, 0.40)
+    env.queue_video(vcodec="libx265")
+    env.worker.process_one()
+    assert env.status() == "converted" and env.encodes == 1
+    assert asked == [env.lib_file]  # sampled from the library file, before any copying
+    assert "Sample: about 40% smaller" in env.run_row()["log_tail"]
+
+
+def test_a_sample_that_saves_too_little_leaves_the_file_untouched(env):
+    h265_library(env)
+    predicted(env, 0.15)
+    env.queue_video(vcodec="libx265")
+    env.worker.process_one()
+    row, run = env.file(), env.run_row()
+    assert (row.status, row.reason) == ("skipped", SAMPLE_SHORT)
+    assert (run["state"], run["error"]) == ("not_worth_it", SAMPLE_SHORT)
+    assert "Sample: about 15% smaller" in run["log_tail"]
+    assert env.encodes == 0 and env.scratch_runs() == []
+    assert env.lib_file.read_bytes() == env.original_bytes
+
+
+def test_a_short_sample_still_removes_extra_audio(env):
+    h265_library(env, english_only=True)
+    predicted(env, 0.10)
+    env.encode_output = dict(vcodec="libx265", crf=35, seconds=2, size=SIZE)
+    f = env.queue_video(vcodec="libx265", audio=(("eng", "English"), ("spa", "Spanish")))
+    env.worker.process_one()
+    run = env.run_row()
+    assert env.status() == "converted"
+    assert run["why"] == "Only the extra-language audio tracks can be removed"
+    assert [t["language"] for t in json.loads(run["tracks_json"])["removed"]] == ["spa"]
+    assert env.db.get_file(f.id).reason is None
+
+
+def test_a_sample_that_fails_skips_the_file_with_a_reason(env):
+    from shelfsaver.sample import SampleError
+    h265_library(env)
+    predicted(env, SampleError("Could not cut a section: broken"))
+    env.queue_video(vcodec="libx265")
+    env.worker.process_one()
+    row, run = env.file(), env.run_row()
+    assert (row.status, row.reason) == ("skipped", "Sample test failed")
+    assert run["state"] == "not_worth_it" and "Could not cut a section" in run["log_tail"]
+    assert env.lib_file.read_bytes() == env.original_bytes
+
+
+def test_stopping_during_the_sample_starts_the_file_again_later(env):
+    h265_library(env)
+    predicted(env, None)
+    env.queue_video(vcodec="libx265")
+    env.worker.process_one()
+    assert env.status() == "queued" and env.run_row()["state"] == "interrupted"
+    assert env.scratch_runs() == []
+
+
+def test_a_full_conversion_that_misses_a_quarter_falls_back_to_removing_audio(env):
+    h265_library(env, english_only=True)
+    predicted(env, 0.40)
+    outputs = [dict(vcodec="libx265", crf=1, seconds=2, size=SIZE),   # barely smaller
+               dict(vcodec="libx265", crf=35, seconds=2, size=SIZE)]  # the audio-only pass
+
+    def encode(cmd, duration, on_progress, should_stop):
+        env.encode_output = outputs.pop(0)
+        return env._fake_encode(cmd, duration, on_progress, should_stop)
+    env.use_encode(encode)
+    env.queue_video(vcodec="libx265", crf=0, audio=(("eng", "English"), ("spa", "Spanish")))
+    env.worker.process_one()
+    assert env.status() == "converted" and outputs == []
+    assert env.run_row()["why"] == "Only the extra-language audio tracks can be removed"
+
+
+def test_a_sample_that_would_grow_says_so_plainly(env):
+    h265_library(env)
+    predicted(env, -0.8)
+    env.queue_video(vcodec="libx265")
+    env.worker.process_one()
+    assert "Sample: about 80% bigger" in env.run_row()["log_tail"]
+    assert env.file().reason == SAMPLE_SHORT

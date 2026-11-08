@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 MIN_SAVINGS = 0.10
+# Re-encoding an H.265 file costs some picture quality, so it has to save much more.
+H265_MIN_SAVINGS = 0.25
+HDR_TRANSFERS = ("smpte2084", "arib-std-b67")
 
 
 @dataclass(frozen=True)

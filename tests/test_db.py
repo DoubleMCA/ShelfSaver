@@ -328,3 +328,36 @@ def test_an_older_database_gains_the_remembered_status_columns(tmp_path):
     assert (moved.path, moved.status) == ("D:\\b.mkv", "missing")
     db.close()
     assert Database(path).get_file(1).path == "D:\\b.mkv"
+
+
+def test_an_older_database_gains_the_shrink_h265_column_switched_off(tmp_path):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA.replace("    shrink_h265 INTEGER NOT NULL DEFAULT 0,\n", ""))
+    conn.execute("INSERT INTO libraries(name, path, level) VALUES ('Old', 'old', 'low')")
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    assert db.list_libraries()[0].shrink_h265 is False
+    db.update_library(1, shrink_h265=True)
+    assert db.list_libraries()[0].shrink_h265 is True
+    db.close()
+
+
+def test_shrink_h265_is_saved_with_a_new_library(db):
+    assert db.add_library("TV", "D:\TV", "medium", False, shrink_h265=True).shrink_h265 is True
+    assert db.add_library("Kids", "D:\Kids", "medium", False).shrink_h265 is False
+
+
+def test_forgetting_saving_results_only_touches_h265_files_that_were_tried(db, lib):
+    def row(name, reason, codec="hevc", status="skipped"):
+        return db.upsert_file(lib.id, f"D:\Movies\{name}.mkv", 1, 1.0, status, reason,
+                              codec=codec).id
+    sampled = row("a", "Sample showed too little saving")
+    final = row("b", "Would not save enough")
+    h264 = row("c", "Would not save enough", codec="h264")
+    other = row("d", "Read-only file")
+    db.forget_saving_results(lib.id)
+    reasons = {i: db.get_file(i).reason for i in (sampled, final, h264, other)}
+    assert reasons == {sampled: "Already H.265", final: "Already H.265",
+                       h264: "Would not save enough", other: "Read-only file"}

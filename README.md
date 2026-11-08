@@ -42,6 +42,9 @@ These show a fresh install with nothing converted yet, and the folder names are 
 - Can keep replaced originals in a holding folder until you clear them.
 - Can remove soundtracks that aren't in your default language (English unless you change it),
   except on dubbed movies. This is off unless you turn it on.
+- Can shrink H.265 files that are far bigger than they need to be. It tests a short sample first
+  and only converts when the file would come out at least 25% smaller. HDR files are left as
+  they are. This is off unless you turn it on for a library.
 - Offers logs and status over a read-only MCP connection.
 
 ## Install

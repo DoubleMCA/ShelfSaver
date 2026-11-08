@@ -2,14 +2,25 @@
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from .languages import DEFAULT_LANGUAGE, is_language, primary_language
 from .models import Decision, MediaInfo
-from .quality import LEVELS, resolution_bucket
+from .quality import HDR_TRANSFERS, LEVELS, resolution_bucket
 
 _DUB = re.compile(r"\bdub(bed)?\b", re.IGNORECASE)
 
 _EFFICIENT_WHY = "Already stored in a modern, efficient format"
+STRIP_WHY = "Only the extra-language audio tracks can be removed"
+SAMPLE_SHORT = "Sample showed too little saving"
+SAMPLE_FAILED = "Sample test failed"
+# Skip reasons that mean an H.265 file was already tried, so it isn't sampled again.
+TRIED_REASONS = (SAMPLE_SHORT, SAMPLE_FAILED, "Would not save enough")
+
+
+def _over_limit(info: MediaInfo, level: str) -> bool:
+    mbps = LEVELS[level].min_mbps[resolution_bucket(info.width)]
+    return info.video_bitrate is not None and info.video_bitrate >= mbps * 1_000_000
 
 
 def audio_to_remove(streams, language: str = DEFAULT_LANGUAGE) -> tuple:
@@ -34,7 +45,9 @@ def _skip(reason: str, why: str) -> Decision:
 
 def decide(info: MediaInfo, level: str, english_only: bool,
            nlink: int = 1, read_only: bool = False,
-           language: str = DEFAULT_LANGUAGE) -> Decision:
+           language: str = DEFAULT_LANGUAGE, shrink_h265: bool = False,
+           tried: Optional[str] = None) -> Decision:
+    """`tried` is the reason an earlier try at shrinking this H.265 file ended, if one did."""
     if nlink > 1:
         return _skip("Linked to another copy",
                      "Another file shares this one's data, so changing it would affect both")
@@ -49,8 +62,13 @@ def decide(info: MediaInfo, level: str, english_only: bool,
     removal = audio_to_remove(info.streams, language) if english_only else ()
 
     skip = None
+    sample_first = False
     if info.video_codec == "hevc":
-        skip = ("Already H.265", _EFFICIENT_WHY)
+        oversized = (shrink_h265 and info.color_transfer not in HDR_TRANSFERS
+                     and _over_limit(info, level))
+        sample_first = oversized and not tried
+        if not sample_first:
+            skip = (tried if oversized else "Already H.265", _EFFICIENT_WHY)
     elif info.video_codec in ("av1", "vp9"):
         skip = ("Already an efficient format", _EFFICIENT_WHY)
     else:
@@ -65,7 +83,10 @@ def decide(info: MediaInfo, level: str, english_only: bool,
         return _skip("Unreadable subtitles, left as is",
                      "Some subtitle tracks are in a format that can't be carried over")
     if skip:
-        return Decision("strip_only", skip[0], removal,
-                        "Only the extra-language audio tracks can be removed")
+        return Decision("strip_only", skip[0], removal, STRIP_WHY)
+    if sample_first:
+        return Decision("convert", "Worth converting", removal,
+                        "Already H.265, but uses far more data than it needs at this resolution",
+                        sample_first=True)
     return Decision("convert", "Worth converting", removal,
                     "Uses far more data than it needs at this resolution")

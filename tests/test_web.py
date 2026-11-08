@@ -1598,3 +1598,42 @@ def test_conversion_time_comes_from_the_recorded_encode_time():
 
 def test_offline_notice_says_the_library_drive_is_offline():
     assert "library drive is offline" in (STATIC / "app.js").read_text(encoding="utf-8")
+
+
+# ---- shrinking oversized H.265 files, per library
+
+def test_shrink_h265_is_off_unless_asked_for(authed, tmp_path):
+    assert add_library(authed, make_folder(tmp_path, "movies")).json()["shrink_h265"] is False
+    body = add_library(authed, make_folder(tmp_path, "tv"), name="TV", shrink_h265=True).json()
+    assert body["shrink_h265"] is True
+
+
+def test_turning_shrink_h265_on_re_evaluates_the_library(authed, parts, tmp_path):
+    _, _, scanner, _ = parts
+    lib = add_library(authed, make_folder(tmp_path, "movies")).json()
+    scanner.wait()
+    scanner.calls.clear()
+    r = authed.patch(f"/api/libraries/{lib['id']}", json={"shrink_h265": True})
+    assert r.status_code == 200 and r.json()["shrink_h265"] is True
+    scanner.wait()
+    assert ("reevaluate", lib["id"]) in scanner.calls
+
+
+def test_a_level_change_lets_tried_h265_files_be_sampled_again(authed, parts, tmp_path):
+    db, _, scanner, _ = parts
+    lib = add_library(authed, make_folder(tmp_path, "movies"), shrink_h265=True).json()
+    scanner.wait()
+    tried = db.upsert_file(lib["id"], str(tmp_path / "movies" / "a.mkv"), 1, 1.0, "skipped",
+                           "Sample showed too little saving", codec="hevc")
+    authed.patch(f"/api/libraries/{lib['id']}", json={"name": "Renamed"})
+    assert db.get_file(tried.id).reason == "Sample showed too little saving"
+    authed.patch(f"/api/libraries/{lib['id']}", json={"level": "high"})
+    scanner.wait()
+    assert db.get_file(tried.id).reason == "Already H.265"
+
+
+def test_library_dialogs_offer_shrinking_h265_switched_off_for_new_libraries():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "shrinkCheckbox(false)" in app_js and "shrinkCheckbox(lib.shrink_h265)" in app_js
+    assert "Shrink oversized H.265 files" in app_js
+    assert "shrink_h265: shrink.input.checked" in app_js

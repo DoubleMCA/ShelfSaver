@@ -339,12 +339,25 @@
     };
   }
 
+  function shrinkCheckbox(checked) {
+    var box = el('input', { type: 'checkbox', id: 'shrink-h265', checked: checked });
+    return {
+      input: box,
+      row: el('div', { class: 'field-row' },
+        el('label', { class: 'check', for: 'shrink-h265' }, box,
+          el('span', { text: 'Shrink oversized H.265 files' })),
+        el('p', { class: 'muted small', text: 'Tests a short sample first and only converts ' +
+          'when the file would come out at least 25% smaller. HDR files are left as they are.' }))
+    };
+  }
+
   function addLibraryDialog(done) {
     openDialog(function (dialog) {
       var name = el('input', { type: 'text', id: 'lib-name', autocomplete: 'off' });
       var folder = el('input', { type: 'text', id: 'lib-path', autocomplete: 'off', class: 'mono' });
       var levels = levelPicker('level', 'medium');
       var english = englishCheckbox(false);
+      var shrink = shrinkCheckbox(false);
       var error = el('p', { class: 'err', role: 'alert', hidden: true });
       var submit = el('button', { type: 'submit', class: 'primary', text: 'Add library' });
       var form = el('form', { novalidate: true },
@@ -361,7 +374,7 @@
               });
             }
           }))),
-        levels, english.row, error,
+        levels, english.row, shrink.row, error,
         dialogButtons(
           el('button', { type: 'button', text: 'Cancel', onclick: function () { dialog.close('cancel'); } }),
           submit));
@@ -370,7 +383,7 @@
         submit.disabled = true;
         api('POST', '/api/libraries', {
           name: name.value, path: folder.value, level: levels.value(),
-          english_only: english.input.checked
+          english_only: english.input.checked, shrink_h265: shrink.input.checked
         }).then(function () {
           dialog.close('added');
           done();
@@ -924,10 +937,11 @@
       openDialog(function (dialog) {
         var levels = levelPicker('level', lib.level);
         var english = englishCheckbox(lib.english_only);
+        var shrink = shrinkCheckbox(lib.shrink_h265);
         var error = el('p', { class: 'err', role: 'alert', hidden: true });
         var save = el('button', { type: 'submit', class: 'primary', text: 'Save' });
         var form = el('form', { novalidate: true },
-          el('h3', { text: 'Library options' }), levels, english.row,
+          el('h3', { text: 'Library options' }), levels, english.row, shrink.row,
           el('p', { class: 'muted small', text: 'Changes apply to files that are not converted yet.' }),
           error,
           dialogButtons(
@@ -949,7 +963,10 @@
         form.addEventListener('submit', function (event) {
           event.preventDefault();
           save.disabled = true;
-          api('PATCH', '/api/libraries/' + lib.id, { level: levels.value(), english_only: english.input.checked })
+          api('PATCH', '/api/libraries/' + lib.id, {
+            level: levels.value(), english_only: english.input.checked,
+            shrink_h265: shrink.input.checked
+          })
             .then(function () { dialog.close('saved'); refresh(); }, function (problem) {
               error.hidden = false;
               error.textContent = messageOf(problem);

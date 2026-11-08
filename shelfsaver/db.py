@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from .decide import TRIED_REASONS
 from .models import FileRow, Library, Run
 
 SCHEMA = """
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS libraries (
     path TEXT NOT NULL,
     level TEXT NOT NULL,
     english_only INTEGER NOT NULL DEFAULT 0,
+    shrink_h265 INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'ok'
 );
 CREATE TABLE IF NOT EXISTS files (
@@ -77,7 +79,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 DEFAULT_SETTINGS = {"holding_enabled": "1"}
 
-LIBRARY_FIELDS ={"name", "path", "level", "english_only", "status"}
+LIBRARY_FIELDS = {"name", "path", "level", "english_only", "shrink_h265", "status"}
 RUN_FIELDS = {
     "state", "step", "started_at", "finished_at", "was_size", "now_size",
     "was_format", "now_format", "now_path", "was_bitrate", "now_bitrate", "why",
@@ -106,6 +108,7 @@ def _library(row: sqlite3.Row) -> Library:
     return Library(
         id=row["id"], name=row["name"], path=row["path"], level=row["level"],
         english_only=bool(row["english_only"]), status=row["status"],
+        shrink_h265=bool(row["shrink_h265"]),
     )
 
 
@@ -134,6 +137,9 @@ class Database:
         for column in ("was_status", "was_reason"):
             if column not in columns:
                 self._exec(f"ALTER TABLE files ADD COLUMN {column} TEXT")
+        columns = {row["name"] for row in self._query("PRAGMA table_info(libraries)")}
+        if "shrink_h265" not in columns:
+            self._exec("ALTER TABLE libraries ADD COLUMN shrink_h265 INTEGER NOT NULL DEFAULT 0")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -161,10 +167,11 @@ class Database:
         return self._conn().execute(sql, tuple(args)).fetchall()
 
     # libraries
-    def add_library(self, name: str, path: str, level: str, english_only: bool) -> Library:
+    def add_library(self, name: str, path: str, level: str, english_only: bool,
+                    shrink_h265: bool = False) -> Library:
         cur = self._exec(
-            "INSERT INTO libraries(name, path, level, english_only) VALUES (?,?,?,?)",
-            (name, path, level, int(english_only)),
+            "INSERT INTO libraries(name, path, level, english_only, shrink_h265) VALUES (?,?,?,?,?)",
+            (name, path, level, int(english_only), int(shrink_h265)),
         )
         return self._get_library(cur.lastrowid)
 
@@ -177,10 +184,17 @@ class Database:
             raise ValueError(f"unknown library fields: {sorted(bad)}")
         if not fields:
             return
-        if "english_only" in fields:
-            fields["english_only"] = int(fields["english_only"])
+        for flag in ("english_only", "shrink_h265"):
+            if flag in fields:
+                fields[flag] = int(fields[flag])
         sets = ", ".join(f"{k}=?" for k in fields)
         self._exec(f"UPDATE libraries SET {sets} WHERE id=?", (*fields.values(), id))
+
+    def forget_saving_results(self, library_id: int) -> None:
+        """Let H.265 files that showed too little saving be sampled again, at a new level."""
+        marks = ",".join("?" * len(TRIED_REASONS))
+        self._exec(f"UPDATE files SET reason='Already H.265' WHERE library_id=? AND codec='hevc'"
+                   f" AND status='skipped' AND reason IN ({marks})", (library_id, *TRIED_REASONS))
 
     def remove_library(self, id: int) -> None:
         """Delete the library and its queue rows. Run history is kept."""

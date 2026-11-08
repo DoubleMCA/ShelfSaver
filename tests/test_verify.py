@@ -553,3 +553,13 @@ def test_failure_log_names_the_exit_code_after_the_errors(monkeypatch):
     plays, log = _decode(monkeypatch, b"Error while decoding stream #0:0\r\n", 69)
     assert plays is False
     assert log == "Error while decoding stream #0:0\nFFmpeg stopped with exit code 69"
+
+
+@pytest.mark.parametrize("saved,passes", [(0.20, False), (0.30, True)])
+def test_a_shrunk_h265_file_has_to_save_a_quarter(tmp_path, saved, passes):
+    out = _out(tmp_path)
+    src = dataclasses.replace(_src(tmp_path), size=int(out.stat().st_size / (1 - saved)))
+    r = verify_output(src, out, convert(sample_first=True), "ffmpeg", "ffprobe")
+    assert r.passed is passes
+    if not passes:
+        assert r.not_worth_it and r.reason == "Would not save enough"

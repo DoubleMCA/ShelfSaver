@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import swap
-from .decide import decide
+from .decide import TRIED_REASONS, decide
 from .languages import load_language
 from .models import IGNORED_REASON, FileRow, Library
 from .probe import UNREADABLE, ProbeError, file_details, probe
@@ -194,7 +194,9 @@ class Scanner:
         decision = decide(info, library.level, library.english_only, nlink=nlink,
                           read_only=bool(getattr(st, "st_file_attributes", 0)
                                          & READ_ONLY_ATTRIBUTE),
-                          language=load_language(self.db.get_setting("default_language")))
+                          language=load_language(self.db.get_setting("default_language")),
+                          shrink_h265=library.shrink_h265,
+                          tried=row.reason if row and row.reason in TRIED_REASONS else None)
         details = file_details(info)
         if row is not None and row.status == "converted":
             # Never converted twice; only the extra-language audio can still be removed. A changed
