@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 import sys
 import threading
 
@@ -36,6 +37,24 @@ def acquire_instance_lock(data_dir):
     return handle
 
 
+def stop_on_sigterm(stop: threading.Event) -> None:
+    """Make SIGTERM (what `docker stop` and systemd send) shut ShelfSaver down cleanly.
+
+    Why this is needed: uvicorn handles SIGTERM, shuts the web server down gracefully, then
+    restores the previous signal handlers and re-sends the same signal to the process so the exit
+    status looks right. Python's default action for SIGTERM is to kill the process on the spot,
+    so the re-sent signal ended the program inside server.run(): the `finally` in main() never
+    ran, the worker was never told to stop and ffmpeg was not asked to finish. With this handler
+    in place uvicorn restores *it*, the re-sent signal just sets the stop flag, server.run()
+    returns normally, and the worker shuts down in order.
+
+    Windows does not deliver SIGTERM to Python (Ctrl+C arrives as KeyboardInterrupt, which
+    already unwinds through `finally`), so nothing is installed there.
+    """
+    if not hostos.IS_WINDOWS:
+        signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
+
+
 def main() -> None:
     config = load_config()
     lock = acquire_instance_lock(config.data_dir)
@@ -49,6 +68,7 @@ def main() -> None:
     worker.recover()
 
     stop = threading.Event()
+    stop_on_sigterm(stop)
     threads = [
         threading.Thread(target=worker.run_forever, args=(stop,), name="worker"),
         threading.Thread(target=scanner.start, args=(stop,), name="scanner"),

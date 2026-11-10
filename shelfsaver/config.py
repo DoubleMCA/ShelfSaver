@@ -38,6 +38,15 @@ def _default_data_dir() -> Path:
     return Path.home() / "ShelfSaver"
 
 
+def _valid_port(value) -> int | None:
+    """A usable TCP port from a config value, or None. Rejects bool (True == 1 in Python)."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 and not isinstance(value, bool) else None
+
+
 def _clean_roots(values) -> list:
     """Keep only non-empty strings, so a bad config.json entry cannot break startup."""
     return [v.strip() for v in values if isinstance(v, str) and v.strip()]
@@ -58,6 +67,8 @@ def load_config() -> Config:
         for key in ("media_roots", "scratch_roots"):
             if isinstance(data.get(key), list):
                 setattr(cfg, key, _clean_roots(data[key]))
+        if _valid_port(data.get("port")):
+            cfg.port = _valid_port(data["port"])
     # The environment wins over the file: in a container it is the normal way to configure,
     # and it lets the same image point at different media without editing a file.
     for key, variable in (("media_roots", "SHELFSAVER_MEDIA_ROOTS"),
@@ -65,4 +76,6 @@ def load_config() -> Config:
         value = os.environ.get(variable)
         if value:
             setattr(cfg, key, _clean_roots(value.split(os.pathsep)))
+    if _valid_port(os.environ.get("SHELFSAVER_PORT")):
+        cfg.port = _valid_port(os.environ["SHELFSAVER_PORT"])
     return cfg
