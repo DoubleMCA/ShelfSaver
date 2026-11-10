@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import logging
-import msvcrt
 import sys
 import threading
 
 import uvicorn
 
+from . import hostos
 from .config import load_config
 from .db import Database
 from .logs import setup_logging
@@ -24,15 +24,13 @@ ALREADY_RUNNING = "ShelfSaver is already running on this PC. Close it first, the
 def acquire_instance_lock(data_dir):
     """Lock a file in the data folder for as long as the returned handle stays open.
 
-    Returns None if another process holds it. Windows drops the lock when its process dies,
-    so a crash never blocks the next start.
+    Returns None if another process holds it. The OS drops the lock when its process dies
+    (on Windows and Linux alike), so a crash never blocks the next start.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     handle = open(data_dir / LOCK_NAME, "a+b")
-    try:
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
+    # The OS-specific locking call lives in hostos so this file imports cleanly on Linux.
+    if not hostos.try_lock_file(handle):
         handle.close()
         return None
     return handle
