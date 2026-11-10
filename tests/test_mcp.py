@@ -170,7 +170,10 @@ def test_health_reports_encoder(live, token, parts, monkeypatch):
     health = call(live, token, "get_health")
     assert health["gpu"] == {"available": True, "name": "NVIDIA Test GPU",
                              "driver": "560.94"}
-    assert health["ffmpeg"] == {"available": True, "version": "7.1-test", "hevc_nvenc": True}
+    # The original keys are unchanged; "encoders" and "encoder" were added for pluggable encoders.
+    assert health["ffmpeg"] == {"available": True, "version": "7.1-test", "hevc_nvenc": True,
+                                "encoders": {"nvenc": True}}
+    assert health["encoder"] == "nvenc"
     assert health["app_version"]
     assert health["free_space"]["libraries"][0]["free_bytes"] is None
     assert health["free_space"]["scratch"]["free_bytes"] is None

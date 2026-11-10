@@ -23,6 +23,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__, swap
 from .db import ensure_mcp_token
+from .encoders import DEFAULT_ENCODER, ENCODERS, Encoder, encoder_for
 from .logs import tail_log
 
 logger = logging.getLogger(__name__)
@@ -46,24 +47,27 @@ def _run_tool(args: list[str]) -> Optional[str]:
     return (done.stdout or "") if done.returncode == 0 else None
 
 
-def _gpu() -> dict:
-    out = _run_tool(["nvidia-smi", "--query-gpu=name,driver_version",
-                     "--format=csv,noheader"])
-    line = (out or "").strip().splitlines()
-    if not line:
-        return {"available": False, "name": None, "driver": None}
-    name, _, driver = line[0].partition(",")
-    return {"available": True, "name": name.strip(), "driver": driver.strip()}
+def _gpu(encoder: Encoder = DEFAULT_ENCODER) -> dict:
+    return encoder.device_info(_run_tool)
 
 
 def _ffmpeg(ffmpeg: str) -> dict:
+    """What this FFmpeg is and which hardware encoders it was built with.
+
+    `hevc_nvenc` stays as its own key because it was the original answer. `encoders` lists
+    every encoder ShelfSaver knows by name, so a new encoder shows up here without changing
+    the shape of the reply.
+    """
     version_text = _run_tool([ffmpeg, "-hide_banner", "-version"])
     if version_text is None:
-        return {"available": False, "version": None, "hevc_nvenc": False}
+        return {"available": False, "version": None, "hevc_nvenc": False,
+                "encoders": {name: False for name in ENCODERS}}
     match = re.search(r"version\s+(\S+)", version_text)
-    encoders = _run_tool([ffmpeg, "-hide_banner", "-encoders"]) or ""
+    listing = _run_tool([ffmpeg, "-hide_banner", "-encoders"]) or ""
+    built = {name: bool(re.search(rf"\b{re.escape(cls.codec)}\b", listing))
+             for name, cls in ENCODERS.items()}
     return {"available": True, "version": match.group(1) if match else None,
-            "hevc_nvenc": bool(re.search(r"\bhevc_nvenc\b", encoders))}
+            "hevc_nvenc": bool(re.search(r"\bhevc_nvenc\b", listing)), "encoders": built}
 
 
 def _free_space(path: Optional[str]) -> dict:
@@ -80,6 +84,7 @@ def build_mcp(db, worker, config) -> MCPServer:
     server = MCPServer("ShelfSaver", instructions=(
         "Read-only access to ShelfSaver's status, logs, files and health."))
     slow_cache: dict[str, Any] = {"at": 0.0, "value": None}
+    encoder = encoder_for(config)
 
     def status_now() -> dict:
         libraries = db.list_libraries()
@@ -100,7 +105,8 @@ def build_mcp(db, worker, config) -> MCPServer:
     def health_now() -> dict:
         age = time.monotonic() - slow_cache["at"]
         if slow_cache["value"] is None or age > HEALTH_CACHE_SECONDS:
-            slow_cache["value"] = {"gpu": _gpu(), "ffmpeg": _ffmpeg(config.ffmpeg)}
+            slow_cache["value"] = {"gpu": _gpu(encoder), "encoder": encoder.name,
+                                   "ffmpeg": _ffmpeg(config.ffmpeg)}
             slow_cache["at"] = time.monotonic()
         scratch = db.get_setting("scratch_dir") or None
         return {
@@ -163,7 +169,8 @@ def build_mcp(db, worker, config) -> MCPServer:
 
     @server.tool()
     async def get_health() -> dict:
-        """GPU name and driver, FFmpeg version, hevc_nvenc, free disk space and app version."""
+        """GPU name and driver, the encoder in use, FFmpeg version and encoders, free disk space
+        and app version."""
         return await asyncio.to_thread(health_now)
 
     return server

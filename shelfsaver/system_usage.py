@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import hostos
+from .encoders import DEFAULT_ENCODER, Encoder
 from .mcp_server import _run_tool
 
 CACHE_SECONDS = 1.5  # just under the pages' refresh, so several open pages share one reading
@@ -57,15 +58,11 @@ def ram_percent() -> Optional[int]:
     return int(status.dwMemoryLoad)
 
 
-def gpu_percent() -> Optional[int]:
-    """The busier of the card and its video encoder: encoding barely shows as general GPU use."""
-    out = _run_tool(["nvidia-smi", "--query-gpu=utilization.gpu,utilization.encoder",
-                     "--format=csv,noheader,nounits"])
-    lines = (out or "").strip().splitlines()
-    if not lines:
-        return None
-    numbers = [int(part) for part in lines[0].split(",") if part.strip().isdigit()]
-    return max(numbers) if numbers else None
+def gpu_percent(encoder: Encoder = DEFAULT_ENCODER) -> Optional[int]:
+    """How busy the video encoder's hardware is. How to measure that is up to the encoder (NVIDIA
+    has nvidia-smi; others differ), so this only passes it the runner. `_run_tool` is looked up
+    here, at call time, so tests can replace it."""
+    return encoder.usage_percent(_run_tool)
 
 
 def _proc_stat_times(text: str) -> Optional[tuple[int, int]]:
@@ -106,7 +103,8 @@ def _cpu_times() -> Optional[tuple[int, int]]:
 
 
 class SystemUsage:
-    def __init__(self) -> None:
+    def __init__(self, encoder: Encoder = DEFAULT_ENCODER) -> None:
+        self._encoder = encoder
         self._lock = threading.Lock()
         self._last_cpu = None
         self._cached = None
@@ -128,7 +126,7 @@ class SystemUsage:
     def read(self) -> dict:
         with self._lock:
             if self._cached is None or _now() - self._cached_at >= CACHE_SECONDS:
-                self._cached = {"cpu": self._cpu_percent(), "gpu": gpu_percent(),
+                self._cached = {"cpu": self._cpu_percent(), "gpu": gpu_percent(self._encoder),
                                 "ram": ram_percent()}
                 self._cached_at = _now()
             return self._cached

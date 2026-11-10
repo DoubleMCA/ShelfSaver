@@ -15,6 +15,7 @@ from pathlib import Path
 
 from shelfsaver.config import load_config
 from shelfsaver.encode import build_command, run_ffmpeg
+from shelfsaver.encoders import ENCODERS
 from shelfsaver.decide import decide
 from shelfsaver.models import Decision
 from shelfsaver.probe import ProbeError, probe
@@ -77,6 +78,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--ffmpeg", default=config.ffmpeg)
     ap.add_argument("--ffprobe", default=config.ffprobe)
+    ap.add_argument("--encoder", default=config.encoder, choices=sorted(ENCODERS),
+                    help="which hardware encoder to compare with")
     args = ap.parse_args(argv)
 
     source = args.source.resolve()
@@ -113,7 +116,8 @@ def main(argv=None) -> int:
     failed = False
     for level in LEVELS:
         dest = out / clip_name(name, level)
-        cmd = build_command(info, decision, level, original, dest, args.ffmpeg)
+        cmd = build_command(info, decision, level, original, dest, args.ffmpeg,
+                            ENCODERS[args.encoder]())
         result = run_ffmpeg(cmd, info.duration, lambda f: None, lambda: False)
         if result.returncode != 0 or not dest.is_file():
             dest.unlink(missing_ok=True)

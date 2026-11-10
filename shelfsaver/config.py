@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .encoders import DEFAULT_NAME, ENCODERS
+
 
 @dataclass
 class Config:
@@ -13,6 +15,8 @@ class Config:
     port: int = 8642
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
+    # Which hardware encoder to use: a key of encoders.ENCODERS.
+    encoder: str = DEFAULT_NAME
     # Folders the web UI may browse and libraries may live in. Empty means "no restriction"
     # on Windows (drive letters, as before) and "nothing allowed yet" on Linux; see
     # web/folders.py for why Linux must be told explicitly.
@@ -67,6 +71,8 @@ def load_config() -> Config:
         for key in ("media_roots", "scratch_roots"):
             if isinstance(data.get(key), list):
                 setattr(cfg, key, _clean_roots(data[key]))
+        if data.get("encoder") in ENCODERS:
+            cfg.encoder = data["encoder"]
         if _valid_port(data.get("port")):
             cfg.port = _valid_port(data["port"])
     # The environment wins over the file: in a container it is the normal way to configure,
@@ -76,6 +82,9 @@ def load_config() -> Config:
         value = os.environ.get(variable)
         if value:
             setattr(cfg, key, _clean_roots(value.split(os.pathsep)))
+    # An unknown name is ignored, not fatal: the file's value (or the default) stays in force.
+    if os.environ.get("SHELFSAVER_ENCODER", "").strip().lower() in ENCODERS:
+        cfg.encoder = os.environ["SHELFSAVER_ENCODER"].strip().lower()
     if _valid_port(os.environ.get("SHELFSAVER_PORT")):
         cfg.port = _valid_port(os.environ["SHELFSAVER_PORT"])
     return cfg
