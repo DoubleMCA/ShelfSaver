@@ -15,16 +15,16 @@ exactly where it is.
 """
 from __future__ import annotations
 
-import ctypes
 import logging
 import os
 import re
 import stat
 from contextlib import contextmanager
-from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Literal, Optional
+
+from . import hostos
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +71,14 @@ class SwapPlan:
 
 
 def ext_path(path) -> str:
-    """Return the `\\\\?\\` form for paths over 240 characters, otherwise the path as given."""
+    """Return the `\\\\?\\` form for paths over 240 characters, otherwise the path as given.
+
+    Only Windows has the ~260-character path limit and the prefix that lifts it. On Linux
+    the prefix would be read as a literal folder name, so paths are always returned as given.
+    """
     text = os.fspath(path)
+    if not hostos.IS_WINDOWS:
+        return text
     if text.startswith(_EXT_PREFIX):
         return text
     full = os.path.abspath(text)
@@ -84,18 +90,12 @@ def ext_path(path) -> str:
 
 
 def _volume_root(path) -> str:
-    """Return the root of the volume holding `path`, including folder-mounted volumes."""
-    full = os.path.abspath(path)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetVolumePathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
-    kernel32.GetVolumePathNameW.restype = wintypes.BOOL
-    buffer = ctypes.create_unicode_buffer(1024)
-    found = kernel32.GetVolumePathNameW(full, buffer, len(buffer))
-    drive = os.path.splitdrive(full)[0]
-    # For a drive that is not connected, Windows fails or can answer with the current drive.
-    if not found or os.path.normcase(os.path.splitdrive(buffer.value)[0]) != os.path.normcase(drive):
-        return drive + "\\"
-    return buffer.value
+    """Return the root of the volume holding `path`, including folder-mounted volumes.
+
+    The per-OS lookup lives in hostos.volume_root. This wrapper stays so that tests, and any
+    caller, have one stable name in this module to replace with a fake volume.
+    """
+    return hostos.volume_root(path)
 
 
 def work_root(library_path) -> Path:
@@ -109,8 +109,13 @@ def is_volume_root(library_path) -> bool:
     if drive and not rest:  # "H:" would otherwise resolve to the current folder on that drive
         return True
 
+    # On Linux a library reached through a symlink is on the filesystem the link points to,
+    # and volume_root answers for that one, so compare resolved paths. Windows keeps abspath:
+    # resolving there would change how junctions and SUBST drives compare.
+    resolve = os.path.abspath if hostos.IS_WINDOWS else os.path.realpath
+
     def comparable(path) -> str:
-        return os.path.normcase(os.path.abspath(path)).rstrip("\\")
+        return os.path.normcase(resolve(path)).rstrip("\\/")
 
     return comparable(library_path) == comparable(_volume_root(library_path))
 
@@ -251,7 +256,9 @@ def _target_taken(plan: SwapPlan) -> bool:
 
 
 def _rename(source: str, target: str) -> None:
-    os.rename(ext_path(source), ext_path(target))
+    # Never replaces an existing target on either OS. Plain os.rename does replace on Linux,
+    # which would break the "nothing is ever overwritten" guarantee; see hostos.
+    hostos.rename_no_replace(ext_path(source), ext_path(target))
 
 
 def _move_to_holding(plan: SwapPlan) -> None:
@@ -375,14 +382,14 @@ def recover_swap(plan: SwapPlan) -> Literal["finished", "not_started", "unexpect
 
 
 def _may_be_a_link(path: Path) -> bool:
-    """True for a reparse point, and for anything that cannot be checked."""
+    """True for a link (Windows reparse point, Linux symlink), and for anything unreadable."""
     try:
-        attributes = os.lstat(ext_path(path)).st_file_attributes
+        info = os.lstat(ext_path(path))
     except FileNotFoundError:
         return False
     except OSError:
         return True
-    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return hostos.is_link_like(info)
 
 
 def _holding_roots(library_paths: Iterable) -> list[Path]:
@@ -421,7 +428,7 @@ def _held_items(folder) -> Iterator[tuple[str, str, int]]:
             # Includes files with other reparse tags, such as deduplicated ones. Deleting one
             # only ever removes that file.
             yield entry.path, _FILE, info.st_size
-        elif info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        elif hostos.is_link_like(info):
             yield entry.path, _LINK, 0
         else:
             yield from _held_items(entry.path)
