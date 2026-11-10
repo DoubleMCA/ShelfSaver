@@ -373,6 +373,7 @@ def test_unreadable_file_fails(env):
     assert env.status(bad) == "failed"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="needs Windows exclusive file locking")
 def test_locked_file_is_tried_again_not_failed(env):
     from tests.test_worker import exclusive_lock
     path = env.bloated("busy.mkv")

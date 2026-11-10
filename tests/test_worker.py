@@ -4,7 +4,6 @@ from __future__ import annotations
 import ctypes
 import json
 import logging
-import msvcrt
 import os
 import shutil
 import threading
@@ -17,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from shelfsaver import swap, worker as worker_module
+from shelfsaver import hostos, swap, worker as worker_module
 from shelfsaver.config import Config
 from shelfsaver.db import Database
 from shelfsaver.encode import EncodeResult
@@ -27,6 +26,12 @@ from shelfsaver.scanner import Scanner
 from shelfsaver.swap import FileInUse, TargetExists, UnexpectedSwapState
 from shelfsaver.worker import GB, IN_USE_RETRY_SECONDS, TARGET_TAKEN, WAITING_IN_USE, Worker
 from tests.helpers import convert, eng_spa, info, make_unreadable_subtitle_video, make_video
+
+# Windows refuses to open a file another program holds without sharing; Linux has no such
+# lock, so a replace simply succeeds. Tests of that wait-and-retry path can only run on Windows.
+windows_only = pytest.mark.skipif(not hostos.IS_WINDOWS, reason="Windows file locking")
+if hostos.IS_WINDOWS:
+    import msvcrt
 
 SIZE = "640x360"
 LOTS_OF_ROOM = 10_000 * GB
@@ -745,12 +750,42 @@ def test_resume_gives_the_breaker_a_fresh_count(env):
 
 # ---- A file in use ----
 
+@contextmanager
+def in_use(env, path):
+    """While active, the swap behaves as if another program has `path` open.
+
+    The worker's wait-and-retry handling is the same on every OS; only how a file ends up
+    "in use" differs. On Windows a plain open() really blocks the swap's rename, so that is
+    used (it is the most faithful). Linux has no such lock: a rename of an open file just
+    works. There the swap functions raise FileInUse, the error swap.py raises on Windows when
+    a rename hits a PermissionError, so the worker's response to it is still exercised.
+    """
+    if hostos.IS_WINDOWS:
+        with open(path, "rb"):
+            yield
+        return
+
+    mine = os.path.normcase(os.path.abspath(path))
+
+    def only_for_this_file(real):
+        # A real lock affects just the one file, so every other swap must carry on normally.
+        def guarded(plan):
+            if os.path.normcase(os.path.abspath(plan.original)) == mine:
+                raise FileInUse("another program has the file open")
+            return real(plan)
+        return guarded
+
+    with env.monkeypatch.context() as patch:
+        patch.setattr(worker_module, "execute_swap", only_for_this_file(worker_module.execute_swap))
+        patch.setattr(worker_module, "recover_swap", only_for_this_file(worker_module.recover_swap))
+        yield
+
 def test_in_use_waits_then_finishes_on_retry(env, monkeypatch):
     clock = SimpleNamespace(now=1000.0)
     monkeypatch.setattr(worker_module, "_now", lambda: clock.now)
     f = env.queue_video()
     # Python opens files without delete sharing, so a real rename fails while this is open.
-    with open(env.lib_file, "rb"):
+    with in_use(env, env.lib_file):
         env.worker.process_one()
         row, run = env.file(), env.run_row()
         assert (row.status, row.reason) == ("waiting_in_use", "Waiting, file is in use")
@@ -784,7 +819,7 @@ def test_waiting_clears_an_earlier_error(env, monkeypatch):
     env.worker.process_one()
     assert env.run_row()["error"]
     monkeypatch.setattr(worker_module, "execute_swap", swap.execute_swap)
-    with open(env.lib_file, "rb"):
+    with in_use(env, env.lib_file):
         env.worker.retry(f.id)
         env.worker.process_one()
     assert env.run_row()["state"] == "waiting_in_use" and env.run_row()["error"] is None
@@ -792,7 +827,7 @@ def test_waiting_clears_an_earlier_error(env, monkeypatch):
 
 def test_owner_retry_tries_a_waiting_file_right_away(env):
     f = env.queue_video()
-    with open(env.lib_file, "rb"):
+    with in_use(env, env.lib_file):
         env.worker.process_one()
     env.worker.retry(f.id)
     assert env.status() == "waiting_in_use"  # the worker thread does the swap, not the caller
@@ -803,7 +838,7 @@ def test_owner_retry_tries_a_waiting_file_right_away(env):
 def test_other_work_continues_while_a_file_is_in_use(env):
     busy = env.queue_video(name="busy.mkv")
     other = env.queue(source_video(env.lib / "other.mkv"), row_size=1)
-    with open(env.lib / "busy.mkv", "rb"):
+    with in_use(env, env.lib / "busy.mkv"):
         env.worker.process_one()
         assert env.status(busy.id) == "waiting_in_use"
         env.worker.process_one()
@@ -813,7 +848,7 @@ def test_other_work_continues_while_a_file_is_in_use(env):
 
 def test_original_changed_while_waiting_is_requeued_and_temp_dropped(env):
     f = env.queue_video()
-    with open(env.lib_file, "rb"):
+    with in_use(env, env.lib_file):
         env.worker.process_one()
     env.lib_file.write_bytes(b"newer")
     env.worker.retry(f.id)
@@ -844,6 +879,7 @@ def exclusive_lock(path):
         kernel32.CloseHandle(handle)
 
 
+@windows_only
 def test_locked_original_waits_and_other_files_keep_going(env, monkeypatch):
     clock = SimpleNamespace(now=1000.0)
     monkeypatch.setattr(worker_module, "_now", lambda: clock.now)
@@ -873,6 +909,7 @@ def test_locked_original_waits_and_other_files_keep_going(env, monkeypatch):
     assert env.status(locked.id) == "converted"
 
 
+@windows_only
 def test_original_locked_just_before_the_copy_waits_and_cleans_up(env, monkeypatch):
     clock = SimpleNamespace(now=1000.0)
     monkeypatch.setattr(worker_module, "_now", lambda: clock.now)
@@ -901,6 +938,7 @@ def test_original_locked_just_before_the_copy_waits_and_cleans_up(env, monkeypat
     assert env.status(f.id) == "converted"
 
 
+@windows_only
 def test_owner_retry_tries_a_locked_file_right_away(env):
     f = env.queue_video()
     with exclusive_lock(env.lib_file):
@@ -911,6 +949,7 @@ def test_owner_retry_tries_a_locked_file_right_away(env):
     assert env.status() == "converted"
 
 
+@windows_only
 def test_locked_file_is_tried_after_a_restart(env):
     f = env.queue_video()
     with exclusive_lock(env.lib_file):
@@ -923,7 +962,7 @@ def test_locked_file_is_tried_after_a_restart(env):
 
 def test_requeued_file_with_a_swap_pending_never_starts_a_second_run(env):
     f = env.queue_video()
-    with open(env.lib_file, "rb"):
+    with in_use(env, env.lib_file):
         env.worker.process_one()
         env.db.requeue([f.id])  # what a rescan could do
         env.worker.process_one()
@@ -1271,7 +1310,7 @@ def test_recover_requeues_when_original_changed_while_the_app_was_down(env):
 def test_recover_waiting_run_still_in_use_keeps_waiting(env):
     env.queue_video()
     env.crash_before_swap()
-    with open(env.lib_file, "rb"):
+    with in_use(env, env.lib_file):
         env.restarted_worker().recover()
         assert env.status() == "waiting_in_use"
         assert env.run_row()["state"] == "waiting_in_use"
@@ -1619,6 +1658,7 @@ def test_no_incoming_folder_means_an_ordinary_interruption(env):
     assert env.run_row()["state"] == "interrupted" and env.status() == "queued"
 
 
+@windows_only
 def test_part_of_the_original_locked_waits_instead_of_failing(env):
     f = env.queue_video()
     with open(env.lib_file, "r+b") as holder:

@@ -2,8 +2,13 @@
 administrator rights and changes the PC."""
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(os.name != "nt", reason="install.ps1 is the Windows installer")
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "install.ps1"
 

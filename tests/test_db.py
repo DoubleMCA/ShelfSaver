@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import threading
 
@@ -236,6 +237,7 @@ def test_an_older_database_gains_the_conversion_time_column(tmp_path):
     assert Database(path).run_record(1)["convert_seconds"] == 12.5
 
 
+@pytest.mark.skipif(os.name != "nt", reason="drive letters are case-insensitive on Windows only")
 def test_held_volumes_are_remembered_once_and_survive_a_restart(tmp_path):
     db = Database(tmp_path / "held.db")
     assert db.held_volumes() == []
@@ -244,6 +246,16 @@ def test_held_volumes_are_remembered_once_and_survive_a_restart(tmp_path):
     db.remember_held_volume("Y:\\")
     db.close()
     assert Database(tmp_path / "held.db").held_volumes() == ["X:\\", "Y:\\"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux twin of the drive-letter test")
+def test_held_volumes_are_case_sensitive_on_linux(tmp_path):
+    # Linux paths are case-sensitive, so these are three different folders, and each is kept.
+    db = Database(tmp_path / "held.db")
+    for volume in ("/mnt/a", "/mnt/A", "/mnt/a", "/mnt/b"):
+        db.remember_held_volume(volume)
+    db.close()
+    assert sorted(Database(tmp_path / "held.db").held_volumes()) == ["/mnt/A", "/mnt/a", "/mnt/b"]
 
 
 def test_a_damaged_held_volume_list_is_replaced_not_fatal(tmp_path):

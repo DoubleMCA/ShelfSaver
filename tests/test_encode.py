@@ -227,6 +227,8 @@ def _alive(pid):
     return "ffmpeg" in out.lower()
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows job object; on Linux this is a documented no-op")
 def test_ffmpeg_dies_when_the_app_is_killed(tmp_path):
     import time
     pidfile = tmp_path / "pid.txt"
