@@ -155,3 +155,22 @@ def test_a_symlink_is_link_like_but_a_file_and_folder_are_not(tmp_path):
     assert hostos.is_link_like(os.lstat(link)) is True
     assert hostos.is_link_like(os.lstat(folder)) is False
     assert hostos.is_link_like(os.lstat(file)) is False
+
+
+# --- jobobject on Linux ---
+
+
+@posix_only
+def test_tying_a_child_to_the_app_is_a_quiet_no_op_on_linux():
+    # See jobobject.kill_with_app for why Linux does not attempt this. It must report that
+    # it did nothing, and must not raise or touch the process.
+    import subprocess
+    import sys
+
+    from shelfsaver.jobobject import kill_with_app
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        assert kill_with_app(proc) is False
+    finally:
+        proc.wait()

@@ -6,6 +6,8 @@ import logging
 import threading
 from ctypes import wintypes
 
+from . import hostos
+
 logger = logging.getLogger(__name__)
 
 _JobObjectExtendedLimitInformation = 9
@@ -68,8 +70,20 @@ def _create_job():
 
 
 def kill_with_app(proc) -> bool:
-    """Make `proc` die when this process does. Returns False (and logs) if it can't."""
+    """Make `proc` die when this process does. Returns False (and logs) if it can't.
+
+    Linux: deliberately does nothing and returns False. The Linux equivalent is
+    prctl(PR_SET_PDEATHSIG), but it can only be set inside the child before it starts, which
+    in Python means `preexec_fn`, and Python documents `preexec_fn` as unsafe in a program
+    with threads (it can deadlock); ShelfSaver is heavily threaded. This is acceptable because:
+    - a normal stop or SIGTERM already makes the worker terminate ffmpeg (encode.run_ffmpeg);
+    - in Docker, removing or stopping the container kills every process inside it.
+    The one gap is a hard `kill -9` of ShelfSaver outside a container, which leaves ffmpeg
+    to finish on its own; it writes only to the scratch folder, never to the library.
+    """
     global _job, _failed
+    if not hostos.IS_WINDOWS:
+        return False
     try:
         with _lock:
             if _failed:
