@@ -283,12 +283,16 @@ def test_failed_scan_fails_length(pair, monkeypatch):
     assert r.reason == "New file is a different length"
 
 
-def _filtered(tmp_path, name, base, vf=None, af=None):
-    """Re-encode `base` keeping original timestamps, dropping frames by select/aselect."""
+def _filtered(tmp_path, name, base, vf=None, audio_drop=None):
+    """Copy `base` keeping original timestamps, dropping video frames by select and audio
+    packets by the `audio_drop` expression. Audio is cut with a packet filter rather than
+    aselect, because some FFmpeg builds (8.0) re-time filtered audio and close the gap."""
     out = tmp_path / name
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(base), "-fps_mode", "passthrough"]
     cmd += ["-vf", vf, "-c:v", "libx265", "-crf", "30"] if vf else ["-c:v", "copy"]
-    cmd += ["-af", af, "-c:a", "aac"] if af else ["-c:a", "copy"]
+    cmd += ["-c:a", "copy"]
+    if audio_drop:
+        cmd += ["-bsf:a", f"noise=drop='{audio_drop}'"]
     subprocess.run(cmd + [str(out)], check=True)
     return out
 
@@ -319,7 +323,7 @@ def test_mid_file_video_hole_fails_length(tmp_path):
 
 def test_audio_hole_fails_length(tmp_path):
     src, base = _long_pair(tmp_path)
-    out = _filtered(tmp_path, "o.mkv", base, af="aselect='lt(t,5)+gt(t,15)'")
+    out = _filtered(tmp_path, "o.mkv", base, audio_drop="gt(pts*tb,5)*lt(pts*tb,15)")
     _check_fails_length(tmp_path, src, out)
 
 
