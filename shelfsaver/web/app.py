@@ -25,6 +25,7 @@ from pydantic import BaseModel, StrictBool
 from .. import swap
 from . import folders
 from ..db import ensure_mcp_token
+from ..encoders import encoder_for
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 from ..models import IGNORED_REASON
 from ..languages import clean_language, language_choices, language_name, load_language
@@ -374,7 +375,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                                   for l in db.list_libraries() if l.status == "offline"],
         }
 
-    system_usage = SystemUsage()
+    system_usage = SystemUsage(encoder_for(config))
 
     @api.get("/system")
     def system():

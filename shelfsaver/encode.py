@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .encoders import DEFAULT_ENCODER, Encoder
 from .jobobject import kill_with_app
 from .models import Decision, MediaInfo, Stream
-from .quality import LEVELS
 
 LOG_TAIL_BYTES = 8 * 1024
 KILL_AFTER_SECONDS = 10
@@ -55,7 +55,10 @@ def _is_main_video(stream: Stream) -> bool:
 
 
 def build_command(info: MediaInfo, decision: Decision, level: str,
-                  source: Path, output: Path, ffmpeg: str) -> list:
+                  source: Path, output: Path, ffmpeg: str,
+                  encoder: Encoder = DEFAULT_ENCODER) -> list:
+    """The ffmpeg command for one file. `encoder` supplies everything hardware-specific; the
+    mapping, containers, subtitles and colour tags below are the same for every encoder."""
     source, output = Path(source), Path(output)
     if source == output:
         raise ValueError("Output must not be the source file")
@@ -64,7 +67,8 @@ def build_command(info: MediaInfo, decision: Decision, level: str,
     converting = decision.action == "convert"
     streams = _mapped_streams(info, decision)
 
-    cmd = [str(ffmpeg), "-y", "-v", "warning", "-i", str(source)]
+    # Hardware device setup, if the encoder needs any, has to come before the input it applies to.
+    cmd = [str(ffmpeg), "-y", "-v", "warning", *encoder.input_args(), "-i", str(source)]
     for s in streams:
         cmd += ["-map", f"0:{s.index}"]
 
@@ -96,22 +100,16 @@ def build_command(info: MediaInfo, decision: Decision, level: str,
     if encoding:
         v = main_video_out
         deep = (info.bit_depth or 8) > 8
-        cmd += [
-            f"-c:v:{v}", "hevc_nvenc", "-preset", "p7", "-tune", "hq",
-            "-rc", "vbr", "-cq", str(LEVELS[level].cq), "-b:v", "0",
-            "-spatial-aq", "1", "-temporal-aq", "1", "-rc-lookahead", "32",
-        ]
-        if deep:
-            cmd += [f"-pix_fmt:v:{v}", "p010le", f"-profile:v:{v}", "main10"]
-        else:
-            cmd += [f"-pix_fmt:v:{v}", "yuv420p", f"-profile:v:{v}", "main"]
+        cmd += encoder.codec_args(v, level, deep)
         for flag, value in (("-color_primaries", info.color_primaries),
                             ("-color_trc", info.color_transfer),
                             ("-colorspace", info.colorspace)):
             if value and value != "unknown":
                 cmd += [f"{flag}:v:{v}", value]
-        if info.field_order not in (None, "", "progressive", "unknown"):
-            cmd += [f"-filter:v:{v}", "bwdif"]
+        deinterlace = info.field_order not in (None, "", "progressive", "unknown")
+        filters = encoder.filters(deinterlace)
+        if filters:
+            cmd += [f"-filter:v:{v}", ",".join(filters)]
         if to_mp4:
             cmd += [f"-tag:v:{v}", "hvc1"]
 
@@ -120,10 +118,10 @@ def build_command(info: MediaInfo, decision: Decision, level: str,
     return cmd
 
 
-def encoder_works(ffmpeg) -> bool:
-    """Whether the graphics card can encode one blank frame, with no video file involved."""
-    cmd = [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", "color=size=640x360:rate=25",
-           "-frames:v", "1", "-c:v", "hevc_nvenc", "-f", "null", "-"]
+def encoder_works(ffmpeg, encoder: Encoder = DEFAULT_ENCODER) -> bool:
+    """Whether the encoder can encode one blank frame, with no video file involved."""
+    cmd = [str(ffmpeg), "-v", "error", *encoder.input_args(), "-f", "lavfi", "-i",
+           "color=size=640x360:rate=25", *encoder.self_test_args(), "-f", "null", "-"]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

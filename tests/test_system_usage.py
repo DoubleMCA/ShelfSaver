@@ -76,7 +76,7 @@ def test_linux_cpu_is_unknown_when_stat_is_unusable(text):
 def _quiet_usage(monkeypatch, times):
     samples = iter(times)
     monkeypatch.setattr(su, "_cpu_times", lambda: next(samples))
-    monkeypatch.setattr(su, "gpu_percent", lambda: 5)
+    monkeypatch.setattr(su, "gpu_percent", lambda *encoder: 5)
     monkeypatch.setattr(su, "ram_percent", lambda: 6)
     monkeypatch.setattr(su.time, "sleep", lambda seconds: None)
     clock = [1000.0]
@@ -101,7 +101,7 @@ def test_cpu_with_no_time_passed_or_no_reading_is_unknown(monkeypatch):
 def test_readings_are_shared_for_a_moment(monkeypatch):
     usage, clock = _quiet_usage(monkeypatch, [(1, 2), (2, 4), (3, 6)])
     gpu = []
-    monkeypatch.setattr(su, "gpu_percent", lambda: gpu.append(1) or 5)
+    monkeypatch.setattr(su, "gpu_percent", lambda *encoder: gpu.append(1) or 5)
     usage.read()
     usage.read()
     assert len(gpu) == 1

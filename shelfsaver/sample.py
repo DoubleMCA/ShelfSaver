@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .encode import build_command, run_ffmpeg
+from .encoders import DEFAULT_ENCODER, Encoder
 from .jobobject import kill_with_app
 from .models import Decision, MediaInfo
 from .probe import ProbeError, probe
@@ -52,7 +53,7 @@ def _cut(source, start: float, seconds: float, video_index: int, dest: Path, ffm
 
 
 def _sizes(info: MediaInfo, level: str, source, folder: Path, ffmpeg, ffprobe,
-           should_stop: Callable[[], bool]) -> Optional[tuple[int, int]]:
+           should_stop: Callable[[], bool], encoder: Encoder) -> Optional[tuple[int, int]]:
     video = next((s for s in info.streams if s.kind == "video" and not s.is_cover_art), None)
     if video is None:
         raise SampleError("The file has no main video track")
@@ -66,7 +67,10 @@ def _sizes(info: MediaInfo, level: str, source, folder: Path, ffmpeg, ffprobe,
             clip_info = probe(clip, ffprobe)
         except ProbeError as exc:
             raise SampleError("A cut section could not be read") from exc
-        cmd = build_command(clip_info, Decision("convert", "Sample", ()), level, clip, out, ffmpeg)
+        # The sample must use the same encoder as the real conversion, or the predicted saving
+        # would describe a different encoder's output.
+        cmd = build_command(clip_info, Decision("convert", "Sample", ()), level, clip, out, ffmpeg,
+                            encoder)
         result = run_ffmpeg(cmd, clip_info.duration, lambda fraction: None, should_stop)
         if result.stopped:
             return None
@@ -78,7 +82,8 @@ def _sizes(info: MediaInfo, level: str, source, folder: Path, ffmpeg, ffprobe,
 
 
 def predict_saving(info: MediaInfo, level: str, source, folder, ffmpeg, ffprobe,
-                   should_stop: Callable[[], bool]) -> Optional[float]:
+                   should_stop: Callable[[], bool],
+                   encoder: Encoder = DEFAULT_ENCODER) -> Optional[float]:
     """The share of the whole file converting would save, or None when stopped.
 
     Only the video is measured, so removed soundtracks never make a file look worth converting.
@@ -86,7 +91,7 @@ def predict_saving(info: MediaInfo, level: str, source, folder, ffmpeg, ffprobe,
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     try:
-        sizes = _sizes(info, level, source, folder, ffmpeg, ffprobe, should_stop)
+        sizes = _sizes(info, level, source, folder, ffmpeg, ffprobe, should_stop, encoder)
     finally:
         for leftover in folder.glob("sample-*"):
             leftover.unlink(missing_ok=True)

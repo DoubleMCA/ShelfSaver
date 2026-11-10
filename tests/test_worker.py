@@ -89,7 +89,7 @@ class Env:
         inside_scratch = Path(path).is_relative_to(self.scratch)
         return self.free["scratch" if inside_scratch else "library"]
 
-    def _check_card(self, ffmpeg):
+    def _check_card(self, ffmpeg, encoder=None):
         self.card_checks += 1
         return self.card_works
 
@@ -1896,7 +1896,7 @@ def predicted(env, saving):
     """Fake the sample test; records the files it was asked about."""
     asked = []
 
-    def fake(info, level, source, folder, ffmpeg, ffprobe, should_stop):
+    def fake(info, level, source, folder, ffmpeg, ffprobe, should_stop, encoder=None):
         asked.append(Path(source))
         if isinstance(saving, Exception):
             raise saving

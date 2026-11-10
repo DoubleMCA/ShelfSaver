@@ -25,6 +25,7 @@ from typing import Callable, Optional
 
 from .decide import SAMPLE_FAILED, SAMPLE_SHORT, STRIP_WHY, TRIED_REASONS, decide
 from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
+from .encoders import encoder_for
 from .languages import load_language
 from .models import IGNORED_REASON, RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import UNREADABLE, ProbeError, file_details, probe
@@ -250,6 +251,7 @@ class Worker:
     def __init__(self, db, config):
         self.db = db
         self.config = config
+        self.encoder = encoder_for(config)  # chosen once: a conversion must not switch mid-run
         self._lock = threading.Lock()  # guards everything status() and retry() touch
         self._status = self._idle_fields()
         self._step_started = 0.0
@@ -688,7 +690,7 @@ class Worker:
     def _convert_copy(self, job: _Job, source_copy: Path) -> bool:
         self._begin_step(job, "Converting")
         cmd = build_command(job.info, job.decision, job.library.level, source_copy, job.output,
-                            self.config.ffmpeg)
+                            self.config.ffmpeg, self.encoder)
         convert_began = _now()
         try:
             result = run_ffmpeg(cmd, job.info.duration, self._on_progress, self._should_stop)
@@ -746,7 +748,8 @@ class Worker:
         try:
             saving = predict_saving(job.info, job.library.level, ext_path(job.file.path),
                                     Path(ext_path(job.scratch_folder / "sample")),
-                                    self.config.ffmpeg, self.config.ffprobe, self._should_stop)
+                                    self.config.ffmpeg, self.config.ffprobe, self._should_stop,
+                                    self.encoder)
         except SampleError as exc:
             self._add_to_log(job, f"{SAMPLE_FAILED}: {exc}")
             if self._strip_instead(job):
@@ -793,7 +796,7 @@ class Worker:
             self._failed_encodes.append(job.file.id)
             failed = list(self._failed_encodes)
         if len(failed) >= ENCODER_FAILURE_LIMIT:
-            if encoder_works(self.config.ffmpeg):
+            if encoder_works(self.config.ffmpeg, self.encoder):
                 logger.warning("The graphics card works, so these files are the problem: %s",
                                failed)
                 with self._lock:

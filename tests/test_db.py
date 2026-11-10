@@ -357,13 +357,13 @@ def test_an_older_database_gains_the_shrink_h265_column_switched_off(tmp_path):
 
 
 def test_shrink_h265_is_saved_with_a_new_library(db):
-    assert db.add_library("TV", "D:\TV", "medium", False, shrink_h265=True).shrink_h265 is True
-    assert db.add_library("Kids", "D:\Kids", "medium", False).shrink_h265 is False
+    assert db.add_library("TV", r"D:\TV", "medium", False, shrink_h265=True).shrink_h265 is True
+    assert db.add_library("Kids", r"D:\Kids", "medium", False).shrink_h265 is False
 
 
 def test_forgetting_saving_results_only_touches_h265_files_that_were_tried(db, lib):
     def row(name, reason, codec="hevc", status="skipped"):
-        return db.upsert_file(lib.id, f"D:\Movies\{name}.mkv", 1, 1.0, status, reason,
+        return db.upsert_file(lib.id, rf"D:\Movies\{name}.mkv", 1, 1.0, status, reason,
                               codec=codec).id
     sampled = row("a", "Sample showed too little saving")
     final = row("b", "Would not save enough")
