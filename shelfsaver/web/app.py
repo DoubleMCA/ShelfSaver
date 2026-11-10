@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import hashlib
 import hmac
 import json
@@ -11,7 +10,6 @@ import os
 import stat
 import re
 import secrets
-import string
 import tempfile
 import threading
 import time
@@ -25,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, StrictBool
 
 from .. import swap
+from . import folders
 from ..db import ensure_mcp_token
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 from ..models import IGNORED_REASON
@@ -48,19 +47,13 @@ HELD_CACHE_SECONDS = 30.0
 STATIC_DIR = Path(__file__).parent / "static"
 PAGES = {"/": "index.html", "/library": "library.html", "/queue": "queue.html",
          "/settings": "settings.html", "/login": "login.html"}
-DRIVE_REMOTE = 4
-HIDDEN_OR_SYSTEM = 0x2 | 0x4  # FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
 
-WHOLE_DRIVE = "Choose a folder on the drive, not the whole drive."
-NOT_LOCAL = "Choose a folder on a drive in this PC. Network folders aren't supported."
 STILL_FINISHING = ("A file in this library is still being finished. "
                    "Try again when it's done.")
 HOLDING_BUSY = ("A file is being replaced or finished, and a held file can be the only copy "
                 "right now. If a conversion is in progress, pause it and wait for it to "
                 "stop. If a file is waiting or needs attention, wait for it, or use Try again "
                 "or the resolve action on that file.")
-IN_WORK_FOLDER = ("That folder is inside the ShelfSaver folder that holds files being replaced. "
-                  "Choose a different folder.")
 SAFE_HOST = re.compile(r"[A-Za-z0-9.\-]{1,253}(:[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\](:[0-9]{1,5})?")
 
 
@@ -167,55 +160,6 @@ def _overlaps(first: str, second: str) -> bool:
     a, b = _norm(first), _norm(second)
     return (a == b or a.startswith(b.rstrip("\\/") + os.sep)
             or b.startswith(a.rstrip("\\/") + os.sep))
-
-
-def _drive_type(path: str) -> int:
-    drive = os.path.splitdrive(os.path.abspath(path))[0]
-    try:
-        return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\")
-    except (AttributeError, OSError):
-        return 0
-
-
-def _check_local_folder(raw: str, what: str) -> str:
-    """Return the cleaned path of an existing local folder, or raise a plain 400."""
-    text = (raw or "").strip()
-    if not text:
-        raise _fail(400, f"Choose a {what} folder.")
-    if text.startswith(("\\\\", "//")):
-        raise _fail(400, NOT_LOCAL)
-    if not os.path.isabs(text) or not os.path.splitdrive(text)[0]:
-        raise _fail(400, f"Enter the full path of the {what} folder, such as D:\\Movies.")
-    path = os.path.normpath(text)
-    if _drive_type(path) == DRIVE_REMOTE:
-        raise _fail(400, NOT_LOCAL)
-    try:
-        is_folder = os.path.isdir(swap.ext_path(path))
-    except OSError:
-        is_folder = False
-    if not is_folder:
-        raise _fail(400, f"That {what} folder can't be found. Check the path and that the "
-                         "drive is connected.")
-    if swap._is_inside(os.path.abspath(path), swap.work_root(path)):
-        raise _fail(400, IN_WORK_FOLDER)
-    return path
-
-
-def _is_visible_folder(entry: os.DirEntry) -> bool:
-    if not entry.is_dir(follow_symlinks=False):
-        return False
-    if entry.name.startswith("$") or entry.name.lower() == "system volume information":
-        return False
-    return not (entry.stat(follow_symlinks=False).st_file_attributes & HIDDEN_OR_SYSTEM)
-
-
-def _drives() -> list[dict]:
-    found = []
-    for letter in string.ascii_uppercase:
-        root = f"{letter}:\\"
-        if os.path.isdir(root) and _drive_type(root) != DRIVE_REMOTE:
-            found.append({"name": root, "path": root})
-    return found
 
 
 def _drive_list(paths) -> list[str]:
@@ -396,6 +340,20 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         return {"held_bytes": held_bytes(),
                 "held_libraries": [l.name for l in db.list_libraries()],
                 "held_drives": _drive_list(held_paths())}
+
+    def check_folder(raw, what: str) -> str:
+        """Validate a library or scratch folder, turning a refusal into a plain 400.
+
+        Libraries must sit under the media roots and the scratch folder under the scratch
+        roots (see folders.py for why Linux needs both lists spelled out).
+        """
+        scratch = what == "scratch"
+        try:
+            return folders.check_local_folder(
+                raw, what, config.scratch_roots if scratch else config.media_roots,
+                "SHELFSAVER_SCRATCH_ROOTS" if scratch else "SHELFSAVER_MEDIA_ROOTS")
+        except folders.FolderProblem as problem:
+            raise _fail(problem.status, problem.message)
 
     def scratch_setting() -> Optional[str]:
         return db.get_setting("scratch_dir") or None
@@ -662,9 +620,9 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     def add_library(body: LibraryBody):
         name = clean_name(body.name)
         level = clean_level(body.level)
-        path = _check_local_folder(body.path, "library")
+        path = check_folder(body.path, "library")
         if swap.is_volume_root(path):
-            raise _fail(400, WHOLE_DRIVE)
+            raise _fail(400, folders.WHOLE_DRIVE)
         for other in db.list_libraries():
             if _overlaps(path, other.path):
                 raise _fail(400, f"That folder overlaps the library \"{other.name}\". "
@@ -716,31 +674,11 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     @api.get("/browse")
     def browse(path: Optional[str] = None):
-        if not path:
-            return {"path": None, "parent": None, "folders": _drives()}
-        if path.startswith(("\\\\", "//")):
-            raise _fail(400, NOT_LOCAL)
-        if not os.path.isabs(path) or not os.path.splitdrive(path)[0]:
-            raise _fail(400, "Enter the full path of a folder.")
-        folder = os.path.normpath(path)
-        if not os.path.isdir(folder):
-            raise _fail(400, "That folder can't be found.")
+        # The picker is also used to choose the scratch folder, so it offers both kinds of root.
         try:
-            with os.scandir(folder) as entries:
-                listing = list(entries)
-        except OSError:
-            raise _fail(403, "ShelfSaver isn't allowed to open that folder.")
-        folders = []
-        for entry in listing:
-            try:
-                if _is_visible_folder(entry):
-                    folders.append({"name": entry.name, "path": os.path.join(folder, entry.name)})
-            except OSError:
-                continue  # no permission for this one: leave it out
-        folders.sort(key=lambda f: f["name"].lower())
-        parent = os.path.dirname(folder.rstrip("\\/"))
-        at_root = os.path.splitdrive(folder)[1] in ("\\", "/") or parent == folder
-        return {"path": folder, "parent": None if at_root else parent, "folders": folders}
+            return folders.browse(path, config.media_roots + config.scratch_roots)
+        except folders.FolderProblem as problem:
+            raise _fail(problem.status, problem.message)
 
     # ---- settings and holding
 
@@ -786,7 +724,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             except ValueError as exc:
                 raise _fail(400, str(exc))
         if body.scratch_dir is not None:
-            scratch = _check_local_folder(body.scratch_dir, "scratch")
+            scratch = check_folder(body.scratch_dir, "scratch")
             for library in db.list_libraries():
                 if _overlaps(scratch, library.path):
                     raise _fail(400, f"The scratch folder can't be inside or contain the "
