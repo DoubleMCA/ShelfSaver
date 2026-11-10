@@ -82,6 +82,56 @@ This stops ShelfSaver and removes the startup task, the firewall rule and the pr
 Your settings and history are kept. To delete those too, add `-RemoveData`. Your video
 libraries, holding folders and scratch disks are never touched.
 
+## Running on Linux (preview)
+
+ShelfSaver now starts and runs on Linux. This is a first step: there is no installer, service
+file or container image yet, and the encoder is still NVIDIA's (NVENC), so converting needs an
+NVIDIA card whose driver and FFmpeg are set up for it. Intel Quick Sync and a Docker image are
+planned next. Everything below has been run on Debian with the test suite and an end-to-end
+check of the real app; NVENC on Linux has not been tried.
+
+Install FFmpeg and Python 3.10 or newer, then from this folder:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e .
+SHELFSAVER_DATA=/var/lib/shelfsaver SHELFSAVER_MEDIA_ROOTS=/media SHELFSAVER_SCRATCH_ROOTS=/scratch .venv/bin/python -m shelfsaver
+```
+
+| Setting | What it does |
+|---|---|
+| `SHELFSAVER_MEDIA_ROOTS` | Folders libraries may be in (separate several with `:`). **Required on Linux.** |
+| `SHELFSAVER_SCRATCH_ROOTS` | Folders the scratch disk may be in. Required before a scratch disk can be chosen. |
+| `SHELFSAVER_DATA` | Where settings, history and the login are kept. Default `~/.local/share/ShelfSaver`. |
+| `SHELFSAVER_PORT` | Web page port. Default 8642. |
+
+The same names can go in `config.json` in the data folder as `media_roots`, `scratch_roots`
+and `port`; the environment wins if both are set.
+
+Things that differ from Windows, and why:
+
+- **Folders must be named up front.** On Windows you pick a drive. A Linux machine has one big
+  folder tree, and the folder picker would otherwise let anyone who signs in browse all of it.
+  Libraries and the picker are limited to the media roots (symlinks are followed, so a link
+  inside a root cannot lead outside it).
+- **A library can't be the top of a mounted volume.** ShelfSaver keeps its `incoming` and
+  `holding` folders at the top of the volume a library is on, so replacing a file is a single
+  rename on one filesystem and can never be cut off halfway. In Docker, map a parent folder
+  (such as your whole media share to `/media`) and add libraries inside it.
+- **Nothing is ever overwritten.** Linux's rename silently replaces an existing file, unlike
+  Windows. ShelfSaver asks the kernel to refuse instead (`renameat2` with `RENAME_NOREPLACE`)
+  and falls back to checking first on filesystems that can't.
+- **Files in use.** Linux lets a file be replaced while another program has it open, so a
+  replaced file is never "waiting, in use" the way it can be on Windows.
+- **Stopping.** `SIGTERM` (what `docker stop` and systemd send) stops the worker in order.
+  If ShelfSaver is killed outright (`kill -9`), ffmpeg is not tied to it as it is on Windows, and
+  may finish on its own into the scratch folder. It never writes to a library.
+- **No HTTPS yet.** The web page is plain HTTP on every network interface, as on Windows, so the
+  password and session cookie cross your network unencrypted. Keep it on a trusted network or put
+  it behind a reverse proxy that adds HTTPS. Binding to one address is planned.
+- **Logs.** Logs go to `logs/shelfsaver.log` in the data folder, not to the terminal.
+- **Unraid.** Tested on Unraid's share layer: file identity survives renames and the no-replace
+  rename works, which the replace step depends on.
+
 ## Stopping ShelfSaver
 
 ShelfSaver restarts itself if it is stopped (and checks every few minutes), so ending the task in
@@ -118,7 +168,9 @@ python -m venv .venv
 .venv\Scripts\python -m pytest
 ```
 
-Tests marked `gpu` need an NVIDIA graphics card.
+Tests marked `gpu` need an NVIDIA graphics card. The tests also run on Linux
+(`python -m pytest -m "not gpu"`, with `ffmpeg` and `git` installed); the few that check
+Windows-only behaviour, such as exclusive file locks, are skipped there and marked in the code.
 
 ## Licence
 

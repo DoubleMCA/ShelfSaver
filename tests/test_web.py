@@ -15,18 +15,29 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from shelfsaver import swap, worker as worker_module
+from shelfsaver import hostos, swap, worker as worker_module
 from shelfsaver.__main__ import acquire_instance_lock
 from shelfsaver.config import Config
 from shelfsaver.db import Database, ensure_mcp_token
 from shelfsaver.scanner import Scanner
-from shelfsaver.web import app as app_module
+from shelfsaver.web import app as app_module, folders
 from shelfsaver.web.app import SESSION_COOKIE, create_app
 from shelfsaver.worker import Worker, _dump_swap
 from tests.helpers import make_video
 
 REAL_VOLUME_ROOT = swap._volume_root
 PASSWORD = "correct horse battery"
+
+
+def make_config(tmp_path) -> Config:
+    """A config whose media and scratch folders may be anywhere under tmp_path.
+
+    Linux refuses folders until media roots are configured (see web/folders.py), so the tests
+    configure the temp folder as the root. Windows keeps its normal drive-letter mode, which
+    is the behaviour these tests were written against.
+    """
+    roots = [] if hostos.IS_WINDOWS else [str(tmp_path)]
+    return Config(data_dir=tmp_path / "data", media_roots=list(roots), scratch_roots=list(roots))
 
 
 class FakeWorker:
@@ -94,7 +105,7 @@ def parts(tmp_path):
     db = Database(tmp_path / "data" / "shelfsaver.db")
     worker = FakeWorker()
     worker.db = db
-    return db, worker, FakeScanner(), Config(data_dir=tmp_path / "data")
+    return db, worker, FakeScanner(), make_config(tmp_path)
 
 
 @pytest.fixture(autouse=True)
@@ -262,12 +273,22 @@ def test_add_library_rejects_with_plain_message(authed, bad):
     assert len(r.json()["detail"]) > 10
 
 
+@pytest.mark.skipif(not hostos.IS_WINDOWS, reason="drive letters; see the volume test below")
 def test_add_library_rejects_a_whole_drive(authed, tmp_path, monkeypatch):
     monkeypatch.setattr(swap, "_volume_root", REAL_VOLUME_ROOT)  # a read-only lookup
     root = os.path.splitdrive(str(tmp_path))[0] + "\\"
     r = authed.post("/api/libraries", json={"name": "All", "path": root, "level": "low"})
     assert r.status_code == 400
     assert r.json()["detail"] == "Choose a folder on the drive, not the whole drive."
+
+
+@pytest.mark.skipif(hostos.IS_WINDOWS, reason="Linux twin of the whole-drive test")
+def test_add_library_rejects_the_top_of_a_mounted_volume(authed, tmp_path, monkeypatch):
+    # The work folder lives at the top of the volume, so a library there would contain it.
+    volume = make_folder(tmp_path, "volume")
+    r = authed.post("/api/libraries", json={"name": "All", "path": str(volume), "level": "low"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == folders.WHOLE_DRIVE
 
 
 def test_add_library_rejects_bad_name_level_and_file(authed, tmp_path):
@@ -402,6 +423,7 @@ def test_browse_lists_folders_not_files(authed, tmp_path):
     assert body["parent"] == str(tmp_path)
 
 
+@pytest.mark.skipif(not hostos.IS_WINDOWS, reason="drive letters")
 def test_browse_without_a_path_shows_drives(authed, tmp_path):
     body = authed.get("/api/browse").json()
     drive = os.path.splitdrive(str(tmp_path))[0].upper() + "\\"
@@ -415,14 +437,14 @@ def test_browse_skips_folders_it_cannot_read_and_rejects_bad_paths(authed, tmp_p
     make_folder(base, "locked")
     import shelfsaver.web.app as app_module
 
-    original = app_module._is_visible_folder
+    original = folders.is_visible_folder
 
     def flaky(entry):
         if entry.name == "locked":
             raise PermissionError("denied")
         return original(entry)
 
-    monkeypatch.setattr(app_module, "_is_visible_folder", flaky)
+    monkeypatch.setattr(folders, "is_visible_folder", flaky)
     names = [f["name"] for f in authed.get("/api/browse", params={"path": str(base)}
                                            ).json()["folders"]]
     assert names == ["ok"]
@@ -742,7 +764,7 @@ def test_validation_errors_are_400_with_a_plain_detail(authed):
 
 def test_real_worker_and_scanner_behind_the_api(tmp_path):
     db = Database(tmp_path / "data" / "shelfsaver.db")
-    config = Config(data_dir=tmp_path / "data")
+    config = make_config(tmp_path)
     worker = Worker(db, config)
     scanner = Scanner(db, config, stable_seconds=0)
     folder = make_folder(tmp_path, "movies")
@@ -771,7 +793,7 @@ def test_real_worker_and_scanner_behind_the_api(tmp_path):
 
 def test_resolve_swap_ends_a_kept_swap_without_touching_files(tmp_path):
     db = Database(tmp_path / "data" / "shelfsaver.db")
-    worker = Worker(db, Config(data_dir=tmp_path / "data"))
+    worker = Worker(db, make_config(tmp_path))
     original = tmp_path / "movies" / "a.mkv"
     original.parent.mkdir()
     original.write_bytes(b"orig")
@@ -795,7 +817,7 @@ def test_resolve_swap_ends_a_kept_swap_without_touching_files(tmp_path):
 def kept_swap(tmp_path, original_exists, held_exists, plan_ok=True):
     """A kept swap whose original is (or is not) in place and whose copy is (or is not) held."""
     db = Database(tmp_path / "data" / "shelfsaver.db")
-    worker = Worker(db, Config(data_dir=tmp_path / "data"))
+    worker = Worker(db, make_config(tmp_path))
     folder = make_folder(tmp_path, "movies")
     original = folder / "a.mkv"
     held = tmp_path / "volume" / "ShelfSaver" / "holding" / "M" / "a.mkv"
@@ -1296,6 +1318,8 @@ def test_a_file_that_changed_since_it_failed_is_not_deleted(authed, parts, tmp_p
     assert db.get_file(row.id) is not None
 
 
+@pytest.mark.skipif(not hostos.IS_WINDOWS,
+                    reason="Linux lets you delete an open file; only Windows refuses")
 def test_a_file_open_in_another_program_is_not_deleted(authed, parts, tmp_path):
     db, *_ = parts
     path, row = failed_file(db, make_folder(tmp_path, "tv"))

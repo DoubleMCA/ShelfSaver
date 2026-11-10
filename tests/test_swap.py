@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from shelfsaver import swap
+from shelfsaver import hostos, swap
 from shelfsaver.swap import (
     FileInUse,
     SwapPlan,
@@ -33,6 +33,11 @@ NEW = b"new"
 ALL_FOUR_CASES = [(".mkv", False), (".mkv", True), (".mp4", False), (".mp4", True)]
 REAL_VOLUME_ROOT = swap._volume_root
 
+# These tests exercise behaviour that exists on only one OS: Windows' exclusive file sharing,
+# its 260-character path limit, drive letters, junctions and case-insensitive names.
+windows_only = pytest.mark.skipif(not hostos.IS_WINDOWS, reason="Windows-only behaviour")
+posix_only = pytest.mark.skipif(hostos.IS_WINDOWS, reason="Linux-only behaviour")
+
 
 class SimulatedCrash(Exception):
     """Not an OSError, so nothing in swap.py can treat it as a recoverable failure."""
@@ -45,6 +50,17 @@ def fake_volume(tmp_path, monkeypatch):
     volume.mkdir()
     monkeypatch.setattr(swap, "_volume_root", lambda path: str(volume))
     return volume
+
+
+@pytest.fixture(autouse=True)
+def plain_rename_on_linux(monkeypatch):
+    """Route Linux renames through os.rename, which these tests wrap to simulate crashes.
+
+    On Linux hostos.rename_no_replace normally calls renameat2 directly, which the os.rename
+    wrappers below cannot see, so a simulated power cut would never fire. The renameat2 path
+    itself is tested in test_hostos.py; here the check-then-rename fallback stands in.
+    """
+    monkeypatch.setattr(hostos, "_renameat2", None)
 
 
 @pytest.fixture
@@ -195,12 +211,24 @@ def test_second_original_with_same_name_does_not_overwrite_held_one(library):
     assert Path(second.original).read_bytes() == b"second-new"
 
 
+@windows_only
 def test_extension_differing_only_in_case_is_the_same_name(library):
     plan = prepare(library, ".mkv", False, name="Movie.MKV")
     assert plan.final == plan.original
     execute_swap(plan)
     assert read_file(plan.original) == NEW
     assert os.listdir(library / "Action") == ["Movie.MKV"]
+
+
+@posix_only
+def test_names_differing_only_in_case_are_different_files_on_linux(library):
+    # Linux file names are case-sensitive, so "Movie.MKV" -> ".mkv" is a real rename: the new
+    # file takes the new name and the old one is removed (the Windows twin keeps one name).
+    plan = prepare(library, ".mkv", False, name="Movie.MKV")
+    assert plan.final != plan.original
+    execute_swap(plan)
+    assert os.listdir(library / "Action") == ["Movie.mkv"]
+    assert read_file(plan.final) == NEW
 
 
 def test_plan_survives_a_json_round_trip(library):
@@ -582,6 +610,7 @@ def test_original_vanishing_during_recovery(library, monkeypatch, holding, outco
 
 
 @pytest.mark.parametrize("final_ext,holding", ALL_FOUR_CASES)
+@windows_only
 def test_open_file_raises_file_in_use_and_keeps_original(library, final_ext, holding):
     plan = prepare(library, final_ext, holding)
     with open_exclusive(plan.original):
@@ -608,6 +637,7 @@ def test_failure_moving_new_file_into_place_restores_the_original(
 
 
 @pytest.mark.parametrize("holding", [False, True])
+@windows_only
 def test_failed_undo_stays_recoverable(library, monkeypatch, holding):
     plan = prepare(library, ".mp4", holding)
     with monkeypatch.context() as patch:
@@ -623,6 +653,7 @@ def test_failed_undo_stays_recoverable(library, monkeypatch, holding):
     assert_finished(plan)
 
 
+@windows_only
 def test_recovery_reports_file_in_use_and_can_run_again(library, monkeypatch):
     plan = prepare(library, ".mp4", False)
     with monkeypatch.context() as patch:
@@ -703,6 +734,7 @@ def long_folder(depth: int = 8) -> str:
 
 
 @pytest.mark.parametrize("final_ext,holding", ALL_FOUR_CASES)
+@windows_only
 def test_path_over_260_chars(library, final_ext, holding):
     plan = prepare(library, final_ext, holding, folder=long_folder())
     assert len(plan.original) > 260
@@ -720,27 +752,32 @@ def test_ext_path_accepts_path_objects(tmp_path):
     assert ext_path(tmp_path / "a.mkv") == str(tmp_path / "a.mkv")
 
 
+@windows_only
 def test_ext_path_prefixes_paths_over_240_chars():
     long_path = "C:\\" + "a" * 240 + "\\b.mkv"
     assert ext_path(long_path) == "\\\\?\\" + long_path
 
 
+@windows_only
 def test_ext_path_threshold_is_240_chars():
     exactly_240 = "C:\\" + "a" * 237
     assert ext_path(exactly_240) == exactly_240
     assert ext_path(exactly_240 + "a") == "\\\\?\\" + exactly_240 + "a"
 
 
+@windows_only
 def test_ext_path_normalizes_forward_slashes_when_prefixing():
     long_path = "C:/" + "a" * 240 + "/b.mkv"
     assert ext_path(long_path) == "\\\\?\\C:\\" + "a" * 240 + "\\b.mkv"
 
 
+@windows_only
 def test_ext_path_is_idempotent():
     long_path = "C:\\" + "a" * 240 + "\\b.mkv"
     assert ext_path(ext_path(long_path)) == ext_path(long_path)
 
 
+@windows_only
 def test_ext_path_handles_network_style_paths():
     long_path = "\\\\server\\share\\" + "a" * 240 + "\\b.mkv"
     assert ext_path(long_path) == "\\\\?\\UNC\\server\\share\\" + "a" * 240 + "\\b.mkv"
@@ -767,13 +804,14 @@ def test_real_volume_root_lookup_finds_the_volume_of_tmp_path(tmp_path):
         pytest.param(1, "C:\\", id="answers-other-drive"),
     ],
 )
+@windows_only
 def test_volume_root_of_a_missing_drive_stays_on_that_drive(monkeypatch, api_found, api_answer):
     def get_volume_path_name(path, buffer, length):
         buffer.value = api_answer
         return api_found
 
     monkeypatch.setattr(
-        swap.ctypes,
+        hostos.ctypes,
         "WinDLL",
         lambda *args, **kwargs: SimpleNamespace(GetVolumePathNameW=get_volume_path_name),
     )
@@ -795,6 +833,18 @@ def test_is_volume_root(library, fake_volume):
     assert not is_volume_root(library)
 
 
+@posix_only
+def test_a_symlinked_library_is_judged_by_where_it_really_lives(tmp_path, monkeypatch):
+    monkeypatch.setattr(swap, "_volume_root", REAL_VOLUME_ROOT)
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    # Same answer for the link and its target; neither is a whole volume unless the tmp dir is.
+    assert REAL_VOLUME_ROOT(link) == REAL_VOLUME_ROOT(real)
+    assert is_volume_root(link) == is_volume_root(real)
+
+
 def test_is_volume_root_with_the_real_lookup(tmp_path, monkeypatch):
     monkeypatch.setattr(swap, "_volume_root", REAL_VOLUME_ROOT)
     assert is_volume_root(REAL_VOLUME_ROOT(tmp_path))
@@ -802,10 +852,12 @@ def test_is_volume_root_with_the_real_lookup(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("bare_drive", ["H:", "h:", "Q:"])
+@windows_only
 def test_bare_drive_is_a_volume_root(bare_drive):
     assert is_volume_root(bare_drive)
 
 
+@windows_only
 def test_bare_drive_library_is_refused(tmp_path):
     bare_drive = os.path.splitdrive(str(tmp_path))[0]
     with pytest.raises(ValueError):
@@ -924,6 +976,7 @@ def test_clear_holding_only_deletes_inside_holding(library):
     assert held_size([str(library)]) == 0
 
 
+@windows_only
 def test_clear_holding_handles_paths_over_260_chars(library):
     held = hold(library, os.path.join(long_folder(), "a.mkv"), b"12345")
     assert len(str(held)) > 260
@@ -932,6 +985,7 @@ def test_clear_holding_handles_paths_over_260_chars(library):
     assert os.listdir(work_root(library) / "holding") == []
 
 
+@windows_only
 def test_clear_holding_does_not_follow_a_junction_out_of_holding(library, fake_volume):
     precious = write_file(fake_volume / "Precious" / "keep.mkv", OLD)
     hold(library, "a.mkv", b"12345")
@@ -942,6 +996,24 @@ def test_clear_holding_does_not_follow_a_junction_out_of_holding(library, fake_v
 
     assert precious.read_bytes() == OLD
     assert not exists(work_root(library) / "holding" / "Movies" / "escape")
+
+
+@posix_only
+@pytest.mark.parametrize("linked", ["holding", "work_root"])
+def test_clear_holding_refuses_when_the_folder_itself_is_a_symlink(library, fake_volume, linked):
+    # Linux twin of the Windows junction test: if holding/ (or ShelfSaver/) is a symlink, clearing
+    # it would delete whatever it points at, so it must be refused outright.
+    precious = write_file(fake_volume / "Precious" / "holding" / "keep.mkv", OLD)
+    work = work_root(library)
+    if linked == "holding":
+        work.mkdir()
+        (work / "holding").symlink_to(precious.parent, target_is_directory=True)
+    else:
+        work.symlink_to(precious.parent.parent, target_is_directory=True)
+
+    assert held_size([str(library)]) == 0
+    assert clear_holding([str(library)]) == 0
+    assert precious.read_bytes() == OLD
 
 
 def test_clear_holding_does_not_follow_a_symlink_out_of_holding(library, fake_volume):
@@ -960,6 +1032,7 @@ def test_clear_holding_does_not_follow_a_symlink_out_of_holding(library, fake_vo
 
 
 @pytest.mark.parametrize("linked", ["holding", "work_root"])
+@windows_only
 def test_clear_holding_refuses_when_the_folder_itself_is_a_junction(library, fake_volume, linked):
     precious = write_file(fake_volume / "Precious" / "holding" / "keep.mkv", OLD)
     work = work_root(library)
@@ -975,6 +1048,7 @@ def test_clear_holding_refuses_when_the_folder_itself_is_a_junction(library, fak
     assert precious.read_bytes() == OLD
 
 
+@windows_only
 def test_clear_holding_skips_a_file_it_cannot_delete_and_counts_only_what_it_freed(library):
     stuck = hold(library, os.path.join("sub", "stuck.mkv"), b"123")
     hold(library, "a.mkv", b"12345")
