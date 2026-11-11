@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import errno
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -174,3 +175,120 @@ def test_tying_a_child_to_the_app_is_a_quiet_no_op_on_linux():
         assert kill_with_app(proc) is False
     finally:
         proc.wait()
+
+
+# --- copy_owner_and_mode: the new file takes the original's owner and permissions ---
+
+
+def _file(path, data=b"x"):
+    path.write_bytes(data)
+    return path
+
+
+def test_windows_does_nothing_and_touches_nothing(tmp_path, monkeypatch):
+    # On Windows access rules come from the folder, so nothing is copied and nothing may be called.
+    monkeypatch.setattr(hostos, "IS_WINDOWS", True)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("must not be called on Windows")
+
+    monkeypatch.setattr(os, "chown", boom, raising=False)
+    monkeypatch.setattr(os, "chmod", boom)
+    assert hostos.copy_owner_and_mode(str(_file(tmp_path / "a")), str(_file(tmp_path / "b"))) == []
+
+
+@posix_only
+def test_the_permission_bits_are_copied(tmp_path):
+    source, target = _file(tmp_path / "s"), _file(tmp_path / "t")
+    os.chmod(source, 0o640)
+    os.chmod(target, 0o600)
+    assert hostos.copy_owner_and_mode(str(source), str(target)) == []
+    assert os.stat(target).st_mode & 0o777 == 0o640
+
+
+@posix_only
+def test_special_bits_are_never_carried_onto_the_new_file(tmp_path):
+    source, target = _file(tmp_path / "s"), _file(tmp_path / "t")
+    os.chmod(source, 0o6755)  # setuid + setgid + rwxr-xr-x
+    os.chmod(target, 0o600)
+    hostos.copy_owner_and_mode(str(source), str(target))
+    assert os.stat(target).st_mode & 0o7777 == 0o755
+
+
+@posix_only
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="changing an owner needs root")
+def test_the_owner_and_group_are_copied_when_allowed(tmp_path):
+    source, target = _file(tmp_path / "s"), _file(tmp_path / "t")
+    os.chown(source, 12345, 23456)
+    assert hostos.copy_owner_and_mode(str(source), str(target)) == []
+    info = os.stat(target)
+    assert (info.st_uid, info.st_gid) == (12345, 23456)
+
+
+@posix_only
+def test_no_chown_is_attempted_when_the_owner_already_matches(tmp_path, monkeypatch):
+    source, target = _file(tmp_path / "s"), _file(tmp_path / "t")  # same process, so same owner
+    os.chmod(source, 0o640)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("chown must not be called when nothing differs")
+
+    monkeypatch.setattr(os, "chown", boom)
+    assert hostos.copy_owner_and_mode(str(source), str(target)) == []
+    assert os.stat(target).st_mode & 0o777 == 0o640
+
+
+@posix_only
+def test_a_refused_owner_change_is_reported_not_raised_and_the_mode_is_still_copied(tmp_path, monkeypatch):
+    source, target = _file(tmp_path / "s"), _file(tmp_path / "t")
+    os.chmod(source, 0o640)
+    os.chmod(target, 0o600)
+    real_lstat = os.lstat
+
+    def other_owner(path, **kwargs):
+        info = real_lstat(path, **kwargs)
+        if str(path) == str(source):  # pretend the original belongs to someone else
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1, st_gid=info.st_gid + 1)
+        return info
+
+    def refused(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "lstat", other_owner)
+    monkeypatch.setattr(os, "chown", refused)
+    problems = hostos.copy_owner_and_mode(str(source), str(target))
+    monkeypatch.undo()
+    assert len(problems) == 1 and "owner and group" in problems[0] and "Operation not permitted" in problems[0]
+    assert os.stat(target).st_mode & 0o777 == 0o640
+
+
+@posix_only
+def test_a_refused_permission_change_is_reported_not_raised(tmp_path, monkeypatch):
+    source, target = _file(tmp_path / "s"), _file(tmp_path / "t")
+    os.chmod(source, 0o640)
+    os.chmod(target, 0o600)
+
+    def refused(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "chmod", refused)
+    problems = hostos.copy_owner_and_mode(str(source), str(target))
+    assert len(problems) == 1 and "permissions" in problems[0]
+
+
+@posix_only
+def test_a_symlink_source_has_no_mode_worth_copying(tmp_path):
+    real = _file(tmp_path / "real")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    target = _file(tmp_path / "t")
+    os.chmod(target, 0o600)
+    assert hostos.copy_owner_and_mode(str(link), str(target)) == []
+    assert os.stat(target).st_mode & 0o777 == 0o600
+
+
+def test_files_that_cannot_be_read_are_reported_not_raised(tmp_path):
+    if hostos.IS_WINDOWS:
+        pytest.skip("Windows does nothing, by design")
+    problems = hostos.copy_owner_and_mode(str(tmp_path / "missing"), str(_file(tmp_path / "t")))
+    assert len(problems) == 1 and "could not read" in problems[0]

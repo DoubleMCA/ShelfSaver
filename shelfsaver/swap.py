@@ -297,9 +297,30 @@ def _undo_first_step(plan: SwapPlan) -> None:
 
 
 def _flush_to_disk(path: str) -> None:
-    """Commit the new file's data, so a power cut after the swap cannot cost it."""
-    with open(ext_path(path), "r+b") as f:
+    """Commit the new file's data, so a power cut after the swap cannot cost it.
+
+    Linux allows fsync on a read-only handle; Windows needs write access to flush. On Linux the
+    read-only form matters: the new file may already have been given a read-only mode (copied
+    from a read-only original) by an earlier, interrupted attempt, and a write open would then be
+    refused and mistaken for "file in use", stalling the retry for good.
+    """
+    with open(ext_path(path), "r+b" if hostos.IS_WINDOWS else "rb") as f:
         os.fsync(f.fileno())
+
+
+def _match_the_originals_owner(plan: SwapPlan) -> None:
+    """Give the new file the original's owner and permissions before it takes the original's place.
+
+    Done while both files still exist (the original is untouched until the first swap step) and
+    before any rename, since renames keep a file's owner and permissions. Running it again after
+    an interrupted attempt is harmless. See hostos.copy_owner_and_mode for what is copied and why.
+    """
+    problems = hostos.copy_owner_and_mode(ext_path(plan.original), ext_path(plan.temp))
+    if problems:
+        logger.warning(
+            "The new file for %s could not be given the original's owner and permissions (%s); it "
+            "keeps the user ShelfSaver runs as. Run ShelfSaver as the user that owns your library, "
+            "or as root.", plan.original, "; ".join(problems))
 
 
 @contextmanager
@@ -334,6 +355,7 @@ def execute_swap(plan: SwapPlan) -> None:
 
         if state == _NOT_STARTED:
             _flush_to_disk(plan.temp)
+            _match_the_originals_owner(plan)  # after the flush: it may make the file read-only
             _first_step(plan)
         try:
             _last_step(plan)

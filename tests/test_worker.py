@@ -1985,3 +1985,14 @@ def test_a_sample_that_would_grow_says_so_plainly(env):
     env.worker.process_one()
     assert "Sample: about 80% bigger" in env.run_row()["log_tail"]
     assert env.file().reason == SAMPLE_SHORT
+
+
+@pytest.mark.skipif(hostos.IS_WINDOWS, reason="Windows files take their access rules from the folder")
+def test_a_converted_file_keeps_the_originals_permissions(env):
+    # The end-to-end case behind the owner/permissions fix: whatever mode the library's file had,
+    # the converted file that takes its place has the same.
+    f = env.queue_video()
+    os.chmod(env.lib_file, 0o640)
+    env.worker.process_one()
+    assert env.status(f.id) == "converted"
+    assert os.stat(env.lib_file).st_mode & 0o777 == 0o640
