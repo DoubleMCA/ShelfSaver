@@ -1,0 +1,174 @@
+# Build the Docker image, check that it starts, and (only for releases and the weekly refresh)
+# publish it to GitHub Container Registry.
+#
+# When it runs, and what each run may do:
+#   pull request     builds and smoke-tests only. It never logs in and never pushes, so a pull
+#                    request (including one from a fork) cannot publish anything.
+#   push of a v* tag builds the tagged version and publishes it as <version> and "latest".
+#   weekly schedule  rebuilds the LATEST RELEASE tag (not main) and republishes it under the same
+#                    names, so Debian security updates reach the image without a new release.
+#   manual run       same as the schedule; for trying it out.
+name: Docker image
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .dockerignore
+      - pyproject.toml
+      - shelfsaver/**
+      - .github/workflows/docker-image.yml
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "17 4 * * 1"   # Mondays 04:17 UTC; an off-the-hour minute avoids the busiest queue
+  workflow_dispatch:
+
+# Read-only by default. Only the publishing job below raises this, and only for itself.
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/jasonadams1301-web/shelfsaver
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    # Write access to packages is requested here, but pull requests always run with a read-only
+    # token (forks especially), and every step that publishes is skipped for them anyway.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # Full history and tags, because the weekly run needs to find the newest release tag.
+      # The token is not kept in the checkout (persist-credentials) because no later step needs
+      # git access, and leaving it on disk for the build steps would be an unnecessary risk.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Decide which version this run builds. Values that come from the event (the tag name) are
+      # passed through env, never pasted into the script text, so a crafted tag name cannot
+      # inject commands.
+      - name: Work out which release to build
+        id: release
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+          publish=false
+          skip=false
+          tag=""
+          # What counts as a release name: v0.6.0, or v0.6.0-rc1.
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'
+          if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+            publish=true
+          elif [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then
+            # Newest release by version order (v0.10.0 comes after v0.9.0), ignoring any tag
+            # that is not a release name. `|| true`: no match is handled just below.
+            tag="$(git tag --list 'v*' --sort=-v:refname | grep -E "$pattern" | head -n 1 || true)"
+            if [ -z "$tag" ]; then
+              echo "No v* release tag exists yet, so there is nothing to refresh."
+              skip=true
+            else
+              publish=true
+            fi
+          fi
+          # Only a release name becomes an image tag. Anything else is dropped completely (not
+          # just left unpublished), so an odd tag name never reaches a later step.
+          if [ -n "$tag" ] && ! printf '%s' "$tag" | grep -Eq "$pattern"; then
+            echo "A tag was pushed that is not a version like v1.2.3, so nothing is published."
+            publish=false
+            tag=""
+          fi
+          # Publish only from the real repository. A fork's copy of this workflow would fail
+          # to log in anyway; this says so plainly instead.
+          if [ "$GITHUB_REPOSITORY" != "jasonadams1301-web/ShelfSaver" ]; then
+            publish=false
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+            echo "publish=$publish"
+            echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+
+      # For the weekly run: build the release, not whatever main looks like today.
+      - name: Check out the release being refreshed
+        if: steps.release.outputs.skip != 'true' && github.event_name != 'push' && steps.release.outputs.tag != ''
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: git checkout --detach "refs/tags/$TAG"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.release.outputs.skip != 'true'
+
+      # Build once into the local Docker, without pushing, so it can be tried before anything is
+      # published.
+      - name: Build
+        if: steps.release.outputs.skip != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          platforms: linux/amd64
+          tags: shelfsaver:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Does the image start, drop to the chosen user, and answer its own health check? An image
+      # that builds but cannot start must not be published.
+      - name: Smoke test
+        if: steps.release.outputs.skip != 'true'
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/config"
+          docker run -d --name smoke -e PUID=99 -e PGID=100 -v "$RUNNER_TEMP/config:/config" shelfsaver:ci
+          ok=false
+          for _ in $(seq 1 30); do
+            if docker exec smoke python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/healthz', timeout=3)" 2>/dev/null; then
+              ok=true
+              break
+            fi
+            sleep 2
+          done
+          docker logs smoke
+          if [ "$ok" != true ]; then
+            echo "The container did not become healthy."
+            exit 1
+          fi
+          pid="$(docker inspect smoke --format '{{.State.Pid}}')"
+          grep -E '^(Uid|Gid):' "/proc/$pid/status"
+          grep -Eq '^Uid:[[:space:]]+99[[:space:]]' "/proc/$pid/status"
+          docker exec smoke ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'hevc_(nvenc|qsv)'
+          docker stop smoke
+
+      # Only now, and only for a release or the weekly refresh, log in and push. The login uses
+      # the run's own temporary token: no stored secrets are involved.
+      - name: Log in to the registry
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same build again: its layers come from the cache, so this is the image that was just
+      # tested, not a different one.
+      - name: Publish
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.release.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha

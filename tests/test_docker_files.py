@@ -75,3 +75,58 @@ def test_template_default_port_matches_the_app_default():
     from shelfsaver.config import Config
     port = [c for c in _template().findall("Config") if c.get("Type") == "Port"][0]
     assert port.get("Target") == str(Config(data_dir=Path(".")).port)
+
+
+# ---- the image build/publish workflow (text checks: no YAML library is a dependency)
+
+WORKFLOW = ROOT / ".github" / "workflows" / "docker-image.yml"
+
+
+def _workflow_text():
+    return WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_workflow_actions_are_pinned_to_exact_commits():
+    """A tag like @v4 can be moved to different code later; a commit hash cannot."""
+    import re
+
+    uses = re.findall(r"^\s*-?\s*uses:\s*(\S+)", _workflow_text(), flags=re.MULTILINE)
+    assert uses, "expected the workflow to use actions"
+    for reference in uses:
+        assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", reference), reference
+
+
+def test_workflow_uses_only_the_built_in_token_and_never_runs_on_pull_request_target():
+    """pull_request_target runs with write access on code from forks; the plain token is the only
+    secret allowed, so a leak of anything else is impossible."""
+    import re
+
+    text = _workflow_text()
+    assert "pull_request_target" not in text
+    assert set(re.findall(r"secrets\.(\w+)", text)) == {"GITHUB_TOKEN"}
+
+
+def test_workflow_only_publishes_for_releases_and_never_for_pull_requests():
+    text = _workflow_text()
+    steps = text.split(chr(10) + "      - ")[1:]          # one entry per step in the job
+    publishing = [step for step in steps if "name: Log in to the registry" in step
+                  or "name: Publish" in step]
+    assert len(publishing) == 2
+    # Both must be gated on the computed flag, which the script sets to true only for a v* tag
+    # push, the weekly run or a manual run, and only in the real repository.
+    for step in publishing:
+        assert "if: steps.release.outputs.publish == 'true'" in step
+    assert text.count("push: true") == 1 and "push: false" in text
+    assert "linux/amd64" in text
+
+
+def test_image_name_in_workflow_matches_the_unraid_template():
+    import re
+
+    image = re.search(r"IMAGE:\s*(\S+)", _workflow_text()).group(1)
+    assert _template().findtext("Repository").startswith(image + ":")
+
+
+def test_dockerfile_health_check_asks_healthz():
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "/healthz" in text.split("HEALTHCHECK", 1)[1]

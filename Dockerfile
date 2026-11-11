@@ -5,6 +5,11 @@
 # Debian's FFmpeg is built with both hevc_nvenc and hevc_qsv, so one image serves both GPUs.
 FROM debian:trixie-slim
 
+# Standard labels. "source" is what GitHub's container registry reads to connect the package to
+# this repository's page. They are plain metadata: nothing is sent anywhere.
+LABEL org.opencontainers.image.source="https://github.com/jasonadams1301-web/ShelfSaver" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 # `apt-get upgrade` pulls in any security fix published since the base image was built (a stale
 # base is the usual way an image ends up with known vulnerabilities). Rebuild regularly.
 # non-free is needed only for intel-media-va-driver-non-free (Intel's complete media driver).
@@ -46,10 +51,11 @@ ENV PATH="/opt/venv/bin:$PATH" \
 EXPOSE 8642
 VOLUME /config
 
-# "Is the web server answering?" Plain TCP connect, so no login is involved and no extra
-# endpoint is needed. Reads the port the same way the app does.
-HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
-  CMD python3 -c "import os,socket; socket.create_connection(('127.0.0.1', int(os.environ.get('SHELFSAVER_PORT') or 8642)), 3).close()"
+# "Is the app answering?" Asks /healthz, which needs no login and returns only {"ok": true}. It
+# fails (HTTP 503) if the database cannot be read, so a hung or broken app is noticed, not only
+# a closed port. urllib raises on any non-200 answer, which is what makes the check fail. Reads
+# the port the same way the app does.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3   CMD python3 -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % (os.environ.get('SHELFSAVER_PORT') or 8642), timeout=3)"
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python3", "-m", "shelfsaver"]
