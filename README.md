@@ -84,7 +84,7 @@ libraries, holding folders and scratch disks are never touched.
 
 ## Running on Linux (preview)
 
-ShelfSaver now starts and runs on Linux, and there is a Docker image (next section). Converting
+ShelfSaver runs on Linux as a service (installer below), by hand, or in Docker. Converting
 needs either an NVIDIA card (NVENC, the default) or an Intel GPU (Quick Sync, see below) with a
 matching FFmpeg. The test suite and an end-to-end check of the real app have been run on Debian
 and Ubuntu; NVENC has run on Linux through the 12 GPU tests (RTX 5070 Ti, FFmpeg 7.1.5 inside the
@@ -93,6 +93,52 @@ image), Quick Sync on Linux on an Intel UHD 770.
 **FFmpeg version matters for HDR.** FFmpeg 6.1 (the one in Ubuntu 24.04) silently drops the HDR10
 mastering and light-level metadata when encoding with `hevc_nvenc`; 7.1.5, 8.0.1 and 9.0.2 keep it.
 Use 7.1 or newer. The Docker image does.
+
+### Install as a service (Debian and Ubuntu)
+
+From this folder:
+
+```bash
+sudo ./scripts/install.sh --media /srv/media
+```
+
+The script installs FFmpeg and Python if they are missing, puts the program in `/opt/shelfsaver`,
+keeps settings, history and the login in `/var/lib/shelfsaver`, and sets ShelfSaver up as a systemd
+service. The service starts at boot, restarts itself if it stops, and runs as the owner of the media
+folder (never as root), so converted files keep their owner. The script also picks NVIDIA or Intel,
+whichever works, opens port 8642 if ufw or firewalld is running, and prints the web address at the
+end.
+
+To update, get the newer copy of this folder and run the same command again. You can leave out
+`--media` this time: the folders already set are kept. The new version is built first, then
+swapped in. If it doesn't start, the old version and its settings are put back.
+
+| Option | What it does |
+|---|---|
+| `--media DIR` | Folder your libraries are in (repeat for several). Needed the first time. |
+| `--scratch DIR` | Folder a scratch disk may be in (repeat for several). Needed before you can choose a scratch disk in Settings. |
+| `--user NAME` | Account to run as. Default: the owner of the first media folder. |
+| `--encoder nvenc\|qsv` | Skip the check and use this encoder. |
+| `--uninstall` | Remove the service, the firewall rule and the program. Settings and history are kept. |
+| `--remove-data` | With `--uninstall`: also delete the settings, history and login. |
+
+- **Logs:** `journalctl -u shelfsaver -f`, plus `/var/lib/shelfsaver/logs/shelfsaver.log`, which the
+  web page shows.
+- **Drivers:** the script doesn't install GPU drivers. For NVIDIA, install the NVIDIA driver. For
+  Intel, see "Intel Quick Sync" below.
+- **The account needs write access to the top folder of the drive** your libraries are on, because
+  ShelfSaver keeps its `incoming` and `holding` folders there.
+- **What has been run:** Ubuntu 26.04 (under WSL) with an RTX 4060 Ti. Each of these was run:
+  - install, then a real NVENC conversion swapped in with the owner kept;
+  - start at boot;
+  - update;
+  - a broken update rolled back to the old version with byte-identical settings;
+  - uninstall, with and without `--remove-data`.
+
+  It has not been run on Debian or with Intel Quick Sync yet.
+- Your video libraries, holding folders and scratch disks are never touched by the script.
+
+### Run it by hand
 
 Install FFmpeg and Python 3.10 or newer, then from this folder:
 
