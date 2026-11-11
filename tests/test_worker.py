@@ -1370,6 +1370,70 @@ def test_recover_survives_a_bad_plan(env, bad):
     assert env.status(second.id) == "converted"
 
 
+# ---- saved swap plans: the fingerprint field was added later, so older plans lack it
+
+def _saved(plan, **changes):
+    """A plan as the database holds it, with any keys removed or changed."""
+    data = json.loads(worker_module._dump_swap(plan, 100, 1.0))
+    for key, value in changes.items():
+        if value is KeyError:
+            data.pop(key)
+        else:
+            data[key] = value
+    return json.dumps(data)
+
+
+def _plan(**kwargs):
+    return swap.SwapPlan("a.mkv", "t.mkv", "a.mkv", None, 3, 4, **kwargs)
+
+
+def test_a_saved_plan_keeps_its_fingerprint():
+    plan = _plan(temp_fingerprint="ab" * 32)
+    loaded, size, mtime = worker_module._load_swap(_saved(plan))
+    assert loaded == plan and (size, mtime) == (100, 1.0)
+
+
+def test_a_plan_saved_before_fingerprints_existed_still_loads():
+    loaded, _, _ = worker_module._load_swap(_saved(_plan(), temp_fingerprint=KeyError))
+    assert loaded.temp_fingerprint is None and loaded.expected_size == 3
+
+
+@pytest.mark.parametrize("bad", [5, ["x"], {"a": 1}, True])
+def test_a_plan_with_a_fingerprint_of_the_wrong_type_is_damaged(bad):
+    with pytest.raises(ValueError):
+        worker_module._load_swap(_saved(_plan(), temp_fingerprint=bad))
+
+
+@pytest.mark.parametrize("field", ["original", "temp", "final", "holding", "expected_size", "temp_file_id"])
+def test_a_plan_missing_any_other_field_is_still_damaged(field):
+    # Only the new, optional field may be absent. Dropping anything else must not load "successfully".
+    with pytest.raises(KeyError):
+        worker_module._load_swap(_saved(_plan(), **{field: KeyError}))
+
+
+def test_recover_finishes_a_swap_planned_before_fingerprints_existed(env):
+    f = env.queue_video()
+    env.crash_before_swap()
+    run = env.run_row(f.id)
+    data = json.loads(run["swap_json"])
+    assert data["temp_fingerprint"]  # new plans do carry one
+    data.pop("temp_fingerprint")      # what an earlier version would have saved
+    env.db.update_run(run["id"], swap_json=json.dumps(data))
+    env.restarted_worker().recover()
+    assert env.status(f.id) == "converted"
+
+
+def test_recover_does_not_finish_a_swap_whose_new_file_was_rewritten(env):
+    f = env.queue_video()
+    env.crash_before_swap()
+    temp = next(iter(env.incoming.iterdir()))
+    with open(temp, "r+b") as handle:  # same file ID and size, different bytes
+        handle.write(b"\0" * 16)
+    env.restarted_worker().recover()
+    assert env.status(f.id) != "converted"
+    assert env.lib_file.read_bytes() == env.original_bytes  # the original is never given up
+
+
 def test_recover_requeues_working_and_cleans_only_run_folders(env):
     unrelated = env.scratch / "family-photos.zip"
     unrelated.write_bytes(b"keep")

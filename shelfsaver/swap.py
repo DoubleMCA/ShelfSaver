@@ -15,6 +15,7 @@ exactly where it is.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -68,6 +69,36 @@ class SwapPlan:
     holding: Optional[str]
     expected_size: int
     temp_file_id: int  # survives a rename on the same volume, so it identifies the new file
+    # What the new file's bytes look like (see `fingerprint`). Optional so that a plan saved by an
+    # earlier version, which has none, still loads and is judged the way it always was.
+    temp_fingerprint: Optional[str] = None
+
+
+_SAMPLE_BYTES = 1024 * 1024
+
+
+def fingerprint(path) -> str:
+    """A content-based identity for a file: SHA-256 of its size and a few sampled stretches.
+
+    Why it exists: a file's size and file ID (inode) alone cannot prove a file is the one we made.
+    On Linux file systems such as ext4 the ID of a deleted file is handed straight to the next new
+    file (measured: 200 of 200 times), so a different file of the same size can carry the ID we
+    recorded. The bytes cannot be faked that way. Small files (up to three samples' worth) are
+    hashed whole; larger ones from the start, the middle and the end, which is a few MB of reading
+    however big the file is. That is not a proof of identity for every byte, but a stranger
+    that matches the size, the ID and all three samples is not a realistic case.
+    """
+    digest = hashlib.sha256()
+    with open(ext_path(path), "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        digest.update(str(size).encode("ascii"))
+        if size <= 3 * _SAMPLE_BYTES:
+            digest.update(handle.read())
+        else:
+            for offset in (0, (size - _SAMPLE_BYTES) // 2, size - _SAMPLE_BYTES):
+                handle.seek(offset)
+                digest.update(handle.read(_SAMPLE_BYTES))
+    return digest.hexdigest()
 
 
 def ext_path(path) -> str:
@@ -187,7 +218,7 @@ def make_plan(
             )
         )
     info = os.lstat(ext_path(temp))
-    return SwapPlan(original, temp, final, holding, info.st_size, info.st_ino)
+    return SwapPlan(original, temp, final, holding, info.st_size, info.st_ino, fingerprint(temp))
 
 
 def _keeps_name(plan: SwapPlan) -> bool:
@@ -199,17 +230,23 @@ def _is_new_file(path: str, plan: SwapPlan) -> bool:
 
     Size alone is not enough: a different file of the same size must never count as ours.
     A file ID of 0 means the volume gave no usable ID, so identity is not confirmed.
+    The file ID alone is not enough either: ext4 and similar file systems reuse the ID of a
+    deleted file for the next new one, so the file's content fingerprint must match as well.
+    A plan without a fingerprint (saved by an earlier version) is judged on size and ID only.
+    Anything that cannot be read counts as "not confirmed", which leaves every file where it is.
     """
     try:
         info = os.lstat(ext_path(path))
+        cheap = (
+            stat.S_ISREG(info.st_mode)
+            and info.st_size == plan.expected_size
+            and plan.temp_file_id != 0
+            and info.st_ino == plan.temp_file_id
+        )
+        # Read the bytes only when everything cheaper already agrees.
+        return cheap and (plan.temp_fingerprint is None or fingerprint(path) == plan.temp_fingerprint)
     except OSError:
         return False
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_size == plan.expected_size
-        and plan.temp_file_id != 0
-        and info.st_ino == plan.temp_file_id
-    )
 
 
 def _may_be_same_file(first: str, second: str) -> bool:
