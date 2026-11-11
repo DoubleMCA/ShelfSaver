@@ -1263,3 +1263,49 @@ def test_a_plan_is_not_changed_by_copying_ownership(library):
     before = dataclasses.asdict(plan)
     execute_swap(plan)
     assert dataclasses.asdict(plan) == before  # plans are saved and compared; this must not alter one
+
+
+# --- folders made for held originals follow the library's folder (see hostos.make_dirs_like) ---
+
+
+@posix_only
+def test_holding_folders_take_the_permissions_of_the_folder_the_original_was_in(library):
+    plan = prepare(library, ".mkv", True)
+    os.chmod(os.path.dirname(plan.original), 0o750)   # the library's folder
+    execute_swap(plan)
+    assert_finished(plan)
+    held = os.path.dirname(plan.holding)
+    folders = []
+    while os.path.basename(held) != "ShelfSaver":      # every level this swap created
+        folders.append(held)
+        held = os.path.dirname(held)
+    assert len(folders) >= 3                           # holding / <library name> / <subfolder>
+    assert {mode_of(f) for f in folders} == {0o750}
+
+
+@posix_only
+def test_an_existing_holding_folder_is_not_changed_by_a_later_swap(library):
+    first = prepare(library, ".mkv", True, name="One.mkv")
+    execute_swap(first)
+    os.chmod(os.path.dirname(first.holding), 0o700)    # someone tightened it afterwards
+    os.chmod(os.path.join(library, "Action"), 0o750)
+    second = prepare(library, ".mkv", True, name="Two.mkv")
+    execute_swap(second)
+    assert os.path.dirname(first.holding) == os.path.dirname(second.holding)
+    assert mode_of(os.path.dirname(second.holding)) == 0o700
+
+
+def test_a_refused_folder_ownership_never_stops_the_swap_and_says_so(library, monkeypatch, caplog):
+    real = swap.hostos.make_dirs_like
+
+    def refused(path, model):
+        real(path, model)
+        return ["owner and group 99:100 were refused (Operation not permitted)"]
+
+    monkeypatch.setattr(swap.hostos, "make_dirs_like", refused)
+    plan = prepare(library, ".mkv", True)
+    with caplog.at_level("WARNING", logger="shelfsaver.swap"):
+        execute_swap(plan)
+    assert_finished(plan)  # held originals and the new file are worth more than folder ownership
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "holding folder" in message and "99:100" in message

@@ -180,7 +180,8 @@ def copy_owner_and_mode(source: str, target: str) -> list:
       setup (ShelfSaver already running as the right user) makes no call and no noise.
     - Changing an owner needs root (or the right group). When it is refused, that is reported as
       a problem and the caller carries on: a finished conversion is worth more than its ownership.
-    - A source that is not a regular file (a symlink, say) has no meaningful mode to copy.
+    - Works for a regular file onto a regular file, and for a folder onto a folder (see
+      make_dirs_like). Anything else (a symlink, say) has no meaningful mode to copy.
     """
     if IS_WINDOWS:
         return []
@@ -190,7 +191,9 @@ def copy_owner_and_mode(source: str, target: str) -> list:
         have = os.lstat(target)
     except OSError as exc:
         return [f"could not read the file details ({exc.strerror or exc})"]
-    if not (stat.S_ISREG(wanted.st_mode) and stat.S_ISREG(have.st_mode)):
+    both_files = stat.S_ISREG(wanted.st_mode) and stat.S_ISREG(have.st_mode)
+    both_folders = stat.S_ISDIR(wanted.st_mode) and stat.S_ISDIR(have.st_mode)
+    if not (both_files or both_folders):
         return []
     if (wanted.st_uid, wanted.st_gid) != (have.st_uid, have.st_gid):
         try:
@@ -204,6 +207,47 @@ def copy_owner_and_mode(source: str, target: str) -> list:
             os.chmod(target, wanted_bits)
     except OSError as exc:
         problems.append(f"permissions {wanted_bits:o} were refused ({exc.strerror or exc})")
+    return problems
+
+
+def make_dirs_like(path: str, model: str) -> list:
+    """Like os.makedirs(path, exist_ok=True), but each folder this call creates is given the owner,
+    group and permission bits of the existing folder `model`. Returns the problems met (see
+    copy_owner_and_mode); folder creation itself raises exactly as os.makedirs would.
+
+    Why: ShelfSaver's work folders (`ShelfSaver/incoming`, `ShelfSaver/holding/...`) sit inside the
+    library's drive, usually a share that other programs and people use. Created plainly they
+    belong to whoever ShelfSaver runs as (root, in a typical container), so the owner of the
+    library could be unable to look inside them, tidy them or delete them. Modelling them on a
+    library folder keeps them manageable.
+
+    Rules, each for a reason:
+    - Only folders created by this call are changed. A folder that already existed (the library
+      itself, or a work folder made by an older version) belongs to somebody else's decision.
+    - If another process creates a folder between our check and our mkdir, that folder is left
+      alone too: it is not ours.
+    - Windows takes access rules from the parent folder, so it simply creates the folders.
+    """
+    if IS_WINDOWS:
+        os.makedirs(path, exist_ok=True)
+        return []
+    missing = []
+    current = os.path.normpath(path)
+    while not os.path.isdir(current):
+        missing.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    problems = []
+    for folder in reversed(missing):
+        try:
+            os.mkdir(folder)
+        except FileExistsError:
+            if os.path.isdir(folder):
+                continue  # created by someone else just now: not ours to change
+            raise  # a file (or a dangling link) is in the way, as os.makedirs would say
+        problems += copy_owner_and_mode(model, folder)
     return problems
 
 

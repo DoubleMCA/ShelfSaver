@@ -182,7 +182,7 @@ docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100 \
 | `/config` | Settings, history, login and the log. Keep it on persistent storage. |
 | `/media` | Where the libraries are (`SHELFSAVER_MEDIA_ROOTS` already points here). |
 | `/scratch` | Optional fast work disk (`SHELFSAVER_SCRATCH_ROOTS` already points here). |
-| `PUID` / `PGID` | The user and group ShelfSaver runs as. Default 99 / 100 (Unraid's nobody / users). Use the owner of your library so nothing else loses access to converted files. |
+| `PUID` / `PGID` | The user and group ShelfSaver runs as. Default 99 / 100 (Unraid's nobody / users). Use the owner of your library so nothing else loses access to converted files. Where ShelfSaver is allowed to (it needs to run as root, or already as that owner), converted files and the `ShelfSaver/incoming` and `ShelfSaver/holding` folders it creates are given the owner, group and permissions of the library's folder; if it is refused, one warning goes to the log and the work carries on. Folders that already exist are never changed. |
 | `UMASK` | Permissions for files the container itself creates. Default 022. Converted files copy the original's permissions instead. |
 
 - The container starts as root only to fix the ownership of `/config` and to join the group that

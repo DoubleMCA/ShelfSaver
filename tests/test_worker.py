@@ -2060,3 +2060,16 @@ def test_a_converted_file_keeps_the_originals_permissions(env):
     env.worker.process_one()
     assert env.status(f.id) == "converted"
     assert os.stat(env.lib_file).st_mode & 0o777 == 0o640
+
+
+@pytest.mark.skipif(hostos.IS_WINDOWS, reason="Windows folders take their access rules from the parent")
+def test_the_work_folders_take_the_library_folders_permissions(env):
+    # End to end: ShelfSaver/ and ShelfSaver/incoming are created during the first conversion,
+    # and must match the library folder (here a non-default 0o750), not whatever the process makes.
+    os.chmod(env.lib, 0o750)
+    f = env.queue_video()
+    env.worker.process_one()
+    assert env.status(f.id) == "converted"
+    work = env.volume / "ShelfSaver"
+    assert os.stat(work).st_mode & 0o777 == 0o750
+    assert os.stat(work / "incoming").st_mode & 0o777 == 0o750
