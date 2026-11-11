@@ -5,6 +5,8 @@
 # Debian's FFmpeg is built with both hevc_nvenc and hevc_qsv, so one image serves both GPUs.
 FROM debian:trixie-slim
 
+# `apt-get upgrade` pulls in any security fix published since the base image was built (a stale
+# base is the usual way an image ends up with known vulnerabilities). Rebuild regularly.
 # non-free is needed only for intel-media-va-driver-non-free (Intel's complete media driver).
 # --no-install-recommends keeps the image small; each package below is there for a reason:
 #   ffmpeg                   the encoder itself (+ ffprobe)
@@ -14,6 +16,7 @@ FROM debian:trixie-slim
 #   vainfo                   lets ShelfSaver name the Intel GPU in its status (see encoders.py)
 RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
  && apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
       ffmpeg python3 python3-venv libvpl2 libmfx-gen1.2 intel-media-va-driver-non-free vainfo \
  && rm -rf /var/lib/apt/lists/*
@@ -21,7 +24,9 @@ RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.li
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY shelfsaver ./shelfsaver
+# pip is upgraded first: the copy bundled with Debian's Python has published security advisories.
 RUN python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
  && /opt/venv/bin/pip install --no-cache-dir . \
  && rm -rf /app/build
 
