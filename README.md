@@ -123,9 +123,12 @@ driver and ShelfSaver. It is about 950 MB, almost all of it FFmpeg's libraries.
 ```bash
 docker build -t shelfsaver .
 # Intel Quick Sync:
-docker run -d --name shelfsaver -p 8642:8642 --device /dev/dri   -e SHELFSAVER_ENCODER=qsv -e PUID=99 -e PGID=100   -v /path/to/appdata:/config -v /path/to/media:/media -v /path/to/scratch:/scratch shelfsaver
+docker run -d --name shelfsaver -p 8642:8642 --device /dev/dri \
+  -e SHELFSAVER_ENCODER=qsv -e PUID=99 -e PGID=100 \
+  -v /path/to/appdata:/config -v /path/to/media:/media -v /path/to/scratch:/scratch shelfsaver
 # NVIDIA (needs the NVIDIA Container Toolkit; leave SHELFSAVER_ENCODER unset):
-docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100   -v /path/to/appdata:/config -v /path/to/media:/media shelfsaver
+docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100 \
+  -v /path/to/appdata:/config -v /path/to/media:/media shelfsaver
 ```
 
 | Setting | What it does |
@@ -140,20 +143,26 @@ docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100  
   owns the GPU device (read from the device, since its number differs between hosts), then drops to
   `PUID:PGID`. Starting it with Docker's `user:` option instead also works.
 - Logs go to the container's output (`docker logs`) and also to the log file the web page reads.
-- `docker stop` shuts down in order and exits 0. The health check only asks whether the web page
-  answers.
+- `docker stop` shuts down in order and exits 0. The health check asks `/healthz`, which
+  also proves the database can be read, so a hung app is noticed and not only a closed port.
+- **Intel's non-free media driver:** the image includes `intel-media-va-driver-non-free` (needed for
+  Quick Sync) under Intel's licence. The licence text is in the image at
+  `/usr/share/doc/intel-media-va-driver-non-free/copyright`.
 - **Unraid:** `docker/shelfsaver-unraid.xml` is a template; copy it to
-  `/boot/config/plugins/dockerMan/templates-user/`. Its image name is a placeholder until the image
-  is published somewhere. For NVIDIA add `--runtime=nvidia` to Extra Parameters and remove the
+  `/boot/config/plugins/dockerMan/templates-user/`. Its image name (`ghcr.io/jasonadams1301-web/shelfsaver`)
+  will work once the image is published; until then build it yourself as above. For NVIDIA add `--runtime=nvidia` to Extra Parameters and remove the
   `/dev/dri` device.
-- **Licences:** the image includes Intel's media driver (`intel-media-va-driver-non-free`), which
-  Debian keeps in its non-free section because parts of it ship without source code. Intel allows
-  it to be shared; its licence is in `/usr/share/doc/intel-media-va-driver-non-free/copyright`
-  inside the image.
-- **What has been run:** the image was built and started, ran as a chosen user, stopped cleanly,
-  and passed the 12 NVENC tests inside the container (GPU passed through from WSL2). The
-  `--gpus all` / NVIDIA Container Toolkit route and Quick Sync inside the container on an Intel host
-  have not been run yet. On Windows, use the Windows install rather than Docker.
+- **What has been run** (the image started the normal way, as 99:100, then driven through its own
+  web API: one library per quality level, a synthetic H.264 file in each, converted, verified and
+  swapped in by ShelfSaver itself):
+  - *Quick Sync*, a Linux server with an Intel UHD 770 (`--device /dev/dri`): all three levels converted
+    to H.265, played start to finish, and kept the original's owner and permissions. The health
+    check reported healthy and `docker stop` exited 0.
+  - *NVIDIA*, RTX 5070 Ti through the NVIDIA Container Toolkit (`--gpus all`) under WSL2: the same
+    result. The 12 NVENC tests also pass inside the container.
+  - Not run: a real Unraid install from the template, or an NVIDIA GPU on a native Linux host (WSL2
+    exposes the GPU through `/dev/dxg`, not `/dev/nvidia*`). On Windows, use the Windows install
+    rather than Docker.
 
 ### Intel Quick Sync (QSV)
 
@@ -169,7 +178,7 @@ Set `SHELFSAVER_ENCODER=qsv`. Needs an Intel GPU and an FFmpeg built with `hevc_
   `"encoder": "qsv"` to `C:\ProgramData\ShelfSaver\config.json`, then restart ShelfSaver.
 - **Checked on Windows (Intel Arc Pro B70):** ShelfSaver's own command and checks passed on 8-bit
   MKV and MP4 (`hvc1` tag), interlaced (deinterlaced) and 10-bit HDR10 sources, with the HDR10
-  colour tags, mastering display and light level data kept.
+  colour tags, mastering display and light level data kept. The full test suite also passed there.
 - **Checked on Linux (Intel UHD 770):** ShelfSaver itself scanned, converted, verified and replaced
   an 8-bit MKV. The 10-bit, MP4 (`hvc1` tag, HDR colour tags) and deinterlace cases were run as the
   same ffmpeg commands directly, not yet through ShelfSaver's own conversion.
