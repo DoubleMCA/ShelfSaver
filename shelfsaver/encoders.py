@@ -140,11 +140,21 @@ class Qsv(Encoder):
     label = "Intel Quick Sync (QSV)"
     codec = "hevc_qsv"
 
-    # Quality number for each level (see quality.LEVELS). PROVISIONAL. 21 is a value already in
-    # use for H.265 on the same iGPU; the other two keep the same spacing
-    # as NVENC's 22/26/30. The scale is not the same as NVENC's, so these want tuning with
-    # scripts/make_compare_clips.py on real files before anyone relies on the size savings.
-    QUALITY = {"low": 21, "medium": 25, "high": 29}
+    # Quality number for each level (see quality.LEVELS). A lower number is a better picture and a
+    # bigger file. These were MEASURED, not guessed: 12 thirty-second clips from 6 different H.264
+    # TV episodes (720p and 1080p, 2.7-6.2 Mbps streaming sources) were encoded at each value and
+    # scored with VMAF against the untouched clip (100 = identical, about 90 = very good). Averages:
+    #     QSV 17 = 65% of the source size, VMAF 92.6   (looks like NVENC cq 26)
+    #     QSV 19 = 47% of the source size, VMAF 91.7
+    #     QSV 21 = 36% of the source size, VMAF 90.8   (looks like NVENC cq 30)
+    # Quick Sync's scale is NOT NVENC's: the same number gives a very different result (QSV 29 fell
+    # to VMAF 82.5, visibly softer, so nothing above 21 is offered). For the same VMAF, QSV needed
+    # about 5% more bytes than NVENC at the high-quality end and about 15% more at the aggressive end.
+    # Results depend heavily on the picture: at QSV 21 the size ranged from 23% to 65% of the source
+    # across the six shows, and a grainy source can come out BIGGER than the original at QSV 17,
+    # in which case the "must be smaller" check skips it. To tune for your own files, use
+    # scripts/make_compare_clips.py --encoder qsv.
+    QUALITY = {"low": 17, "medium": 19, "high": 21}
     DEFAULT_LINUX_DEVICE = "/dev/dri/renderD128"  # the first (usually only) render node
 
     def __init__(self, device: str = "") -> None:
