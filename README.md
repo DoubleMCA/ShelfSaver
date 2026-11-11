@@ -258,7 +258,8 @@ Things that differ from Windows, and why:
   may finish on its own into the scratch folder. It never writes to a library.
 - **No HTTPS yet.** The web page is plain HTTP on every network interface, as on Windows, so the
   password and session cookie cross your network unencrypted. Keep it on a trusted network or put
-  it behind a reverse proxy that adds HTTPS. Binding to one address is planned.
+  it behind a reverse proxy that adds HTTPS. To listen on one address only, set
+  `SHELFSAVER_HOST` (see the settings table).
 - **Logs.** Logs go to `logs/shelfsaver.log` in the data folder, not to the terminal.
 - **Unraid.** Tested on Unraid's share layer: file identity survives renames and the no-replace
   rename works, which the replace step depends on.
@@ -277,6 +278,13 @@ network:
   `X-Forwarded-*` headers are ignored, so behind a proxy the cookie is not marked `Secure` and the
   login limit sees the proxy's address, shared by every visitor, instead of each visitor's. Do not
   use `*` unless only the proxy can reach ShelfSaver's port.
+- **Set the password before exposing the port.** The first person to open the page chooses the
+  password, so until you have, anyone who can reach the port can claim the install.
+- A request that changes something (pause, resume, retry, ignore, add a library, change a
+  setting) is refused when the browser says it came from another web page, even one served from
+  another port on the same machine. Scripts and `curl` are not affected.
+- The database file (`shelfsaver.db`, which holds the MCP token) is made readable by its owner
+  only, whatever the `UMASK` is.
 - Every page and answer carries a Content-Security-Policy (the browser only runs ShelfSaver's own
   script and refuses to be framed), `X-Content-Type-Options`, `X-Frame-Options` and
   `Referrer-Policy`. API answers are marked not to be cached, because one contains the MCP token.

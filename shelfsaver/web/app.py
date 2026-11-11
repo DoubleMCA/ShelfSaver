@@ -251,6 +251,59 @@ class SecurityHeaders:
         await self.app(scope, receive, send_with_headers)
 
 
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+class CrossSiteGuard:
+    """ASGI middleware: refuse a state-changing /api request that a browser says came from
+    another page.
+
+    Why this is needed even with a SameSite=Strict sign-in cookie: "same site" ignores the port,
+    so a page served by anything else on this machine's address (another container, another
+    web app) counts as the same site, and the browser sends our cookie with its requests. A
+    plain <form> or text/plain `fetch` needs no permission check ("preflight") from us. Most
+    endpoints already refuse such a body, but the ones that take no body (pause, resume, retry,
+    ignore, sign out) would just run. Browsers label every request with where it came from, so
+    we use that label:
+
+    - `Sec-Fetch-Site` (all current Firefox, Chrome and Safari): only `same-origin` (our own
+      pages) and `none` (typed in the address bar) pass.
+    - Older browsers send `Origin` on a cross-origin POST instead: it must name this same host.
+    - Neither header means this is not a browser page (curl, a script): it has to hold the
+      cookie anyway, and a browser would have sent one of the two.
+
+    The check never looks at the sign-in, so it adds no way to learn whether a session is valid.
+    Only /api is covered: /mcp uses a bearer token that a browser never adds by itself.
+    """
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    @staticmethod
+    def _from_elsewhere(scope: Scope) -> bool:
+        # ASGI gives header names as lowercase bytes; decode them so the lookups below read cleanly.
+        sent = {name.decode("latin-1"): value.decode("latin-1")
+                for name, value in scope.get("headers", [])
+                if name in (b"sec-fetch-site", b"origin", b"host")}
+        site = sent.get("sec-fetch-site")
+        if site is not None:
+            return site not in ("same-origin", "none")
+        origin = sent.get("origin")
+        if origin is None:
+            return False
+        host = sent.get("host", "")
+        return origin.split("://", 1)[-1].lower() != host.lower() or "://" not in origin
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (scope["type"] == "http" and scope["method"] not in SAFE_METHODS
+                and scope["path"].startswith("/api/") and self._from_elsewhere(scope)):
+            response = JSONResponse(status_code=403, content={
+                "detail": "That request came from another web page, so ShelfSaver refused it."})
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def create_app(db, worker, scanner, config) -> FastAPI:
     mcp_server = build_mcp(db, worker, config)
     mcp_app = mcp_server.streamable_http_app(
@@ -849,6 +902,8 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     app.mount("/static", _FreshStaticFiles(directory=STATIC_DIR), name="static")
     # Added last so it wraps everything: /mcp never reaches the pages or the sign-in routes.
     app.add_middleware(McpGate, db=db, mcp_app=mcp_app)
+    # Inside the headers (so its refusal carries them too), outside everything else.
+    app.add_middleware(CrossSiteGuard)
     # Outermost, so every response (pages, API, /mcp, errors) gets the headers.
     app.add_middleware(SecurityHeaders)
     return app

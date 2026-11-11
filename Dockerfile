@@ -55,7 +55,8 @@ VOLUME /config
 # fails (HTTP 503) if the database cannot be read, so a hung or broken app is noticed, not only
 # a closed port. urllib raises on any non-200 answer, which is what makes the check fail. Reads
 # the port the same way the app does.
-HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3   CMD python3 -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % (os.environ.get('SHELFSAVER_PORT') or 8642), timeout=3)"
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+  CMD python3 -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % (os.environ.get('SHELFSAVER_PORT') or 8642), timeout=3)"
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python3", "-m", "shelfsaver"]

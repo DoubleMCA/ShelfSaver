@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -12,6 +13,8 @@ from typing import Any, Iterable, Optional
 
 from .decide import TRIED_REASONS
 from .models import FileRow, Library, Run
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS libraries (
@@ -127,6 +130,29 @@ class Database:
         self._local = threading.local()
         self._conn().executescript(SCHEMA)
         self._add_missing_columns()
+        self._keep_private()
+
+    def _keep_private(self) -> None:
+        """Make the database readable by its owner only (Linux and macOS).
+
+        Why: it holds the MCP token in plain text (the settings page has to show it again, so it
+        cannot be hashed), the password hash and the sign-in session hashes. A default umask of
+        022, as the Docker image uses, would let every other account on the machine, or every
+        other container that mounts the same appdata folder, read the token and use it. The
+        -wal and -shm side files copy the main file's mode when SQLite creates them, so only
+        files that already exist need changing. Windows ignores these mode bits, and a failure
+        here (a share that refuses chmod) must not stop ShelfSaver from starting.
+        """
+        if os.name == "nt":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            side = self.path.with_name(self.path.name + suffix)
+            try:
+                os.chmod(side, 0o600)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning("Could not make %s private: %s", side.name, exc)
 
     def _add_missing_columns(self) -> None:
         """Bring a database from an earlier version up to date."""
