@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import hostos
 from .decide import SAMPLE_FAILED, SAMPLE_SHORT, STRIP_WHY, TRIED_REASONS, decide
 from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
 from .encoders import encoder_for
@@ -849,7 +850,14 @@ class Worker:
         temp = incoming / f"{_temp_stem(job.run.id, job.run.started_at)}{job.output.suffix}"
         job.temp = temp
         try:
-            os.makedirs(ext_path(incoming), exist_ok=True)
+            # Made like the library folder, so its owner can still open and clean up
+            # `ShelfSaver/incoming` (see hostos.make_dirs_like).
+            problems = hostos.make_dirs_like(ext_path(incoming), ext_path(job.library.path))
+            if problems:
+                logger.warning(
+                    "The work folder %s could not be given the library folder's owner and "
+                    "permissions (%s); it keeps the user ShelfSaver runs as. Run ShelfSaver as "
+                    "the user that owns your library, or as root.", incoming, "; ".join(problems))
             _copy_file(job.output, temp, self._on_progress, self._should_stop)
             same = (_sha256(job.output, self._should_stop)
                     == _sha256(temp, self._should_stop))

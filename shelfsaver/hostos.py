@@ -207,6 +207,102 @@ def copy_owner_and_mode(source: str, target: str) -> list:
     return problems
 
 
+def make_dirs_like(path: str, model: str) -> list:
+    """Like os.makedirs(path, exist_ok=True), but each folder this call creates is given the owner,
+    group and permission bits of the existing folder `model`. Returns the problems met; folder
+    creation itself raises exactly as os.makedirs would.
+
+    Why: ShelfSaver's work folders (`ShelfSaver/incoming`, `ShelfSaver/holding/...`) sit inside the
+    library's drive, usually a share that other programs and people use. Created plainly they
+    belong to whoever ShelfSaver runs as (root, in a typical container), so the owner of the
+    library could be unable to look inside them, tidy them or delete them. Modelling them on a
+    library folder keeps them manageable. The trust decision is deliberate: whoever may change the
+    model folder already controls the library files themselves, so matching it hands them nothing
+    they did not have.
+
+    Rules, each for a reason:
+    - Only folders created by this call are changed. A folder that already existed (the library
+      itself, or a work folder made by an older version) belongs to somebody else's decision.
+    - If another process creates a folder between our check and our mkdir, that folder is left
+      alone too: it is not ours.
+    - The folder is created with the model's permission bits from the start (the umask can only
+      narrow them), so it is never, even for an instant, more open than its model, except for
+      one deliberate addition: the owner always keeps read, write and enter (`| 0o700`). Some
+      people make a library's top folder read-only (0555) so it cannot be deleted by mistake.
+      Copying that exactly would make ShelfSaver's own `ShelfSaver` folder read-only to ShelfSaver,
+      and it could not create `incoming` inside it. The others' bits are still copied as they are.
+    - The owner and mode are then applied through an open handle to the folder, opened without
+      following links. A path could be swapped for a link to somewhere else between our mkdir and
+      a chown/chmod; a handle cannot.
+    - Windows takes access rules from the parent folder, so it simply creates the folders.
+    """
+    if IS_WINDOWS:
+        os.makedirs(path, exist_ok=True)
+        return []
+    problems = []
+    try:
+        wanted = os.lstat(model)
+        if not stat.S_ISDIR(wanted.st_mode):
+            raise OSError("not a folder")
+    except OSError as exc:
+        wanted = None
+        problems.append(f"could not read the folder to copy from ({exc.strerror or exc})")
+    missing = []
+    current = os.path.normpath(path)
+    while not os.path.isdir(current):
+        missing.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    for folder in reversed(missing):
+        try:
+            if wanted is None:
+                os.mkdir(folder)
+            else:
+                os.mkdir(folder, _folder_bits(wanted))
+        except FileExistsError:
+            if os.path.isdir(folder):
+                continue  # created by someone else just now: not ours to change
+            raise  # a file (or a dangling link) is in the way, as os.makedirs would say
+        if wanted is not None:
+            problems += _match_new_folder(wanted, folder)
+    return problems
+
+
+def _folder_bits(wanted) -> int:
+    """The nine permission bits for a folder we create: the model's, plus full access for the
+    owner (the account ShelfSaver runs as, once ownership has been matched or kept)."""
+    return (stat.S_IMODE(wanted.st_mode) & 0o777) | 0o700
+
+
+def _match_new_folder(wanted, folder: str) -> list:
+    """Apply `wanted`'s owner, group and nine permission bits to the just-created `folder`, using
+    a handle that refuses to follow a link. Returns plain-text problems; never raises."""
+    try:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        return [f"could not open the new folder safely ({exc.strerror or exc})"]
+    problems = []
+    try:
+        have = os.fstat(fd)
+        if (wanted.st_uid, wanted.st_gid) != (have.st_uid, have.st_gid):
+            try:
+                os.fchown(fd, wanted.st_uid, wanted.st_gid)
+            except OSError as exc:
+                problems.append(f"owner and group {wanted.st_uid}:{wanted.st_gid} were refused ({exc.strerror or exc})")
+        wanted_bits = _folder_bits(wanted)
+        try:
+            # Read the mode again: a successful chown can clear bits on its own.
+            if stat.S_IMODE(os.fstat(fd).st_mode) & 0o777 != wanted_bits:
+                os.fchmod(fd, wanted_bits)
+        except OSError as exc:
+            problems.append(f"permissions {wanted_bits:o} were refused ({exc.strerror or exc})")
+    finally:
+        os.close(fd)
+    return problems
+
+
 def rename_no_replace(source: str, target: str) -> None:
     """Rename, but raise FileExistsError instead of ever replacing an existing `target`.
 

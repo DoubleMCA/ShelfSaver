@@ -292,3 +292,180 @@ def test_files_that_cannot_be_read_are_reported_not_raised(tmp_path):
         pytest.skip("Windows does nothing, by design")
     problems = hostos.copy_owner_and_mode(str(tmp_path / "missing"), str(_file(tmp_path / "t")))
     assert len(problems) == 1 and "could not read" in problems[0]
+
+
+# --- make_dirs_like: new work folders take the library folder's owner and permissions ---
+
+
+def _folder(path, mode=0o750):
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, mode)
+    return path
+
+
+def _mode(path):
+    return os.stat(path).st_mode & 0o777
+
+
+def test_make_dirs_like_creates_the_whole_chain_even_on_windows(tmp_path):
+    model = _folder(tmp_path / "Library")
+    target = tmp_path / "Library" / "ShelfSaver" / "holding" / "Movies"
+    assert hostos.make_dirs_like(str(target), str(model)) == []
+    assert target.is_dir()
+
+
+@posix_only
+def test_every_new_folder_gets_the_models_permissions(tmp_path):
+    model = _folder(tmp_path / "Library", 0o770)
+    target = tmp_path / "Library" / "ShelfSaver" / "holding" / "Movies"
+    assert hostos.make_dirs_like(str(target), str(model)) == []
+    for folder in (tmp_path / "Library" / "ShelfSaver", tmp_path / "Library" / "ShelfSaver" / "holding", target):
+        assert _mode(folder) == 0o770, folder  # not the 0o755 a plain mkdir would leave
+
+
+@posix_only
+def test_a_folder_that_already_exists_is_left_exactly_as_it_is(tmp_path):
+    model = _folder(tmp_path / "Library", 0o770)
+    existing = _folder(tmp_path / "Library" / "ShelfSaver", 0o700)  # e.g. made by an older version
+    target = existing / "incoming"
+    hostos.make_dirs_like(str(target), str(model))
+    assert _mode(existing) == 0o700      # untouched: not ours to change
+    assert _mode(target) == 0o770        # only the new one follows the model
+
+
+@posix_only
+def test_nothing_special_is_carried_onto_a_new_folder(tmp_path):
+    model = _folder(tmp_path / "Library", 0o2775)  # setgid share folder
+    target = tmp_path / "Library" / "ShelfSaver"
+    hostos.make_dirs_like(str(target), str(model))
+    assert os.stat(target).st_mode & 0o7777 == 0o775
+
+
+@posix_only
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="changing an owner needs root")
+def test_new_folders_take_the_models_owner_and_group(tmp_path):
+    model = _folder(tmp_path / "Library")
+    os.chown(model, 12345, 23456)
+    target = tmp_path / "Library" / "ShelfSaver" / "incoming"
+    assert hostos.make_dirs_like(str(target), str(model)) == []
+    for folder in (target, target.parent):
+        info = os.stat(folder)
+        assert (info.st_uid, info.st_gid) == (12345, 23456), folder
+
+
+@posix_only
+def test_a_refused_owner_or_mode_change_is_reported_but_the_folders_are_still_made(tmp_path, monkeypatch):
+    model = _folder(tmp_path / "Library", 0o770)
+    real_lstat = os.lstat
+
+    def other_owner(path, **kwargs):
+        info = real_lstat(path, **kwargs)
+        if str(path) == str(model):
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1, st_gid=info.st_gid + 1)
+        return info
+
+    def refused(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
+
+    target = tmp_path / "Library" / "ShelfSaver" / "incoming"
+    monkeypatch.setattr(os, "lstat", other_owner)
+    monkeypatch.setattr(os, "fchown", refused)
+    problems = hostos.make_dirs_like(str(target), str(model))
+    monkeypatch.undo()
+    assert target.is_dir()                                   # the work still happens
+    assert len(problems) == 2 and all("owner and group" in p for p in problems)  # once per new folder
+
+
+@posix_only
+def test_a_file_in_the_way_raises_like_makedirs_does(tmp_path):
+    model = _folder(tmp_path / "Library")
+    (tmp_path / "Library" / "ShelfSaver").write_text("not a folder")
+    with pytest.raises(FileExistsError):
+        hostos.make_dirs_like(str(tmp_path / "Library" / "ShelfSaver" / "incoming"), str(model))
+    with pytest.raises(OSError):
+        hostos.make_dirs_like(str(tmp_path / "Library" / "ShelfSaver"), str(model))
+
+
+@posix_only
+def test_a_folder_made_by_someone_else_at_the_same_moment_is_left_alone(tmp_path, monkeypatch):
+    model = _folder(tmp_path / "Library", 0o770)
+    target = tmp_path / "Library" / "ShelfSaver"
+    real_mkdir = os.mkdir
+
+    def lose_the_race(path, *args, **kwargs):
+        real_mkdir(path, 0o700)            # the other process wins...
+        raise FileExistsError(17, "File exists", path)  # ...so ours reports that it exists
+
+    monkeypatch.setattr(os, "mkdir", lose_the_race)
+    assert hostos.make_dirs_like(str(target), str(model)) == []
+    monkeypatch.undo()
+    assert _mode(target) == 0o700          # not changed to match the model
+
+
+@posix_only
+def test_a_new_folder_is_never_more_open_than_its_model_even_for_an_instant(tmp_path, monkeypatch):
+    model = _folder(tmp_path / "Library", 0o750)
+    modes_asked_for = []
+    real_mkdir = os.mkdir
+
+    def record(path, mode=0o777, *args, **kwargs):
+        modes_asked_for.append(mode)
+        real_mkdir(path, mode)
+
+    monkeypatch.setattr(os, "mkdir", record)
+    hostos.make_dirs_like(str(tmp_path / "Library" / "ShelfSaver" / "incoming"), str(model))
+    assert modes_asked_for == [0o750, 0o750]       # born restricted, never 0o777 and then narrowed
+
+
+@posix_only
+def test_a_new_folder_swapped_for_a_link_is_not_followed(tmp_path, monkeypatch):
+    """Between our mkdir and the chown/chmod, a path can be replaced by a link to somewhere else.
+    The change must go nowhere (and be reported), not onto the link's target."""
+    model = _folder(tmp_path / "Library", 0o770)
+    elsewhere = _folder(tmp_path / "Elsewhere", 0o700)
+    target = tmp_path / "Library" / "ShelfSaver"
+    real_mkdir = os.mkdir
+
+    def swap_for_a_link(path, *args, **kwargs):
+        real_mkdir(path, *args)
+        os.rmdir(path)
+        os.symlink(elsewhere, path)
+
+    monkeypatch.setattr(os, "mkdir", swap_for_a_link)
+    problems = hostos.make_dirs_like(str(target), str(model))
+    monkeypatch.undo()
+    assert _mode(elsewhere) == 0o700                   # untouched
+    assert len(problems) == 1 and "safely" in problems[0]
+
+
+@posix_only
+def test_an_unreadable_model_folder_is_reported_and_the_folders_are_still_made(tmp_path):
+    target = tmp_path / "ShelfSaver" / "incoming"
+    problems = hostos.make_dirs_like(str(target), str(tmp_path / "no-such-folder"))
+    assert target.is_dir()
+    assert len(problems) == 1 and "could not read" in problems[0]
+
+
+@posix_only
+def test_a_read_only_model_folder_still_lets_us_create_the_chain(tmp_path):
+    """A library's top folder is sometimes made read-only (0555) so it cannot be deleted by
+    mistake. Copying that exactly made our own `ShelfSaver` folder read-only to us, so creating
+    `incoming` inside it failed (as any account but root; root ignores the bits, so the mode is
+    checked directly too)."""
+    model = _folder(tmp_path / "Library", 0o555)
+    # The new folders go under a writable parent: only the model's mode is read-only.
+    outer = _folder(tmp_path / "Outer", 0o755)
+    target = outer / "ShelfSaver" / "incoming"
+    problems = hostos.make_dirs_like(str(target), str(model))
+    assert problems == []
+    assert target.is_dir()
+    assert _mode(outer / "ShelfSaver") == 0o755       # others' bits copied, owner keeps write
+    assert _mode(target) == 0o755
+
+
+@posix_only
+def test_the_owner_keeps_full_access_but_the_others_bits_stay_as_the_model_has_them(tmp_path):
+    model = _folder(tmp_path / "Library", 0o050)      # owner has nothing, the group can read/enter
+    target = tmp_path / "ShelfSaver"
+    hostos.make_dirs_like(str(target), str(model))
+    assert _mode(target) == 0o750

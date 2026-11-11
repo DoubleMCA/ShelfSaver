@@ -299,7 +299,15 @@ def _rename(source: str, target: str) -> None:
 
 
 def _move_to_holding(plan: SwapPlan) -> None:
-    os.makedirs(ext_path(os.path.dirname(plan.holding)), exist_ok=True)
+    # The held file's folders are made like the folder the original lives in, so the library's
+    # owner can still open, tidy and delete them (see hostos.make_dirs_like).
+    problems = hostos.make_dirs_like(ext_path(os.path.dirname(plan.holding)),
+                                     ext_path(os.path.dirname(plan.original)))
+    if problems:
+        logger.warning(
+            "The holding folder for %s could not be given the library folder's owner and "
+            "permissions (%s); it keeps the user ShelfSaver runs as. Run ShelfSaver as the user "
+            "that owns your library, or as root.", plan.original, "; ".join(problems))
     _rename(plan.original, plan.holding)
 
 
