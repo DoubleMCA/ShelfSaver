@@ -122,10 +122,13 @@ Set `SHELFSAVER_ENCODER=qsv`. Needs an Intel GPU and an FFmpeg built with `hevc_
 - **Checked on Linux (Intel UHD 770):** ShelfSaver itself scanned, converted, verified and replaced
   an 8-bit MKV. The 10-bit, MP4 (`hvc1` tag, HDR colour tags) and deinterlace cases were run as the
   same ffmpeg commands directly, not yet through ShelfSaver's own conversion.
-- **Quality numbers are provisional.** Low/Medium/High map to Quick Sync quality 21/25/29 (21 is a
-  value already in use for H.265 on Intel graphics). Quick Sync's scale is not NVENC's, so the amount saved
-  at each level may differ; use `scripts/make_compare_clips.py --encoder qsv` on your own files
-  before relying on it.
+- **Quality numbers were measured.** Low/Medium/High map to Quick Sync quality 17/19/21 (lower is a
+  better picture and a bigger file). On 12 clips from 6 H.264 TV episodes (streaming-quality
+  sources), that came out at about 65% / 47% / 36% of the original size, with VMAF scores of
+  92.6 / 91.7 / 90.8 (VMAF compares the new file to the original: 100 is identical, around 90 is very good).
+  Quick Sync's scale is not NVENC's: 17 looks like NVENC's Medium (26) and 21 looks like its High (30).
+  Savings depend a lot on the picture: a grainy source can shrink little or not at all, and is then
+  skipped. Use `scripts/make_compare_clips.py --encoder qsv` on your own files to check.
 - **The GPU tile on the home page shows a dash** for Quick Sync: Intel offers no simple reading that
   doesn't need extra permissions, and a made-up number would mislead.
 

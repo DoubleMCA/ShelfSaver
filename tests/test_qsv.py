@@ -58,11 +58,14 @@ def test_quality_levels_are_ordered_and_inside_the_documented_range():
     assert values == sorted(values) and len(set(values)) == 3  # low saves least, high saves most
     assert all(1 <= v <= 51 for v in values)                   # -global_quality is 1 to 51
     assert set(Qsv.QUALITY) == set(LEVELS)                      # every level has a number
+    # Pinned on purpose: these come from a VMAF measurement (see the comment on Qsv.QUALITY).
+    # Change them only with new measurements, and update that comment and the README with them.
+    assert values == [17, 19, 21]
 
 
 def test_eight_bit_uses_nv12_and_main():
     args = Qsv().codec_args(0, "medium", deep=False)
-    assert args == ["-c:v:0", "hevc_qsv", "-preset", "slow", "-global_quality", "25",
+    assert args == ["-c:v:0", "hevc_qsv", "-preset", "slow", "-global_quality", "19",
                     "-pix_fmt:v:0", "nv12", "-profile:v:0", "main"]
 
 
@@ -113,7 +116,7 @@ def test_a_full_linux_command_reads_as_expected(monkeypatch):
     assert _cmd(False, monkeypatch) == [
         "ffmpeg", "-y", "-v", "warning", "-init_hw_device", "qsv:hw,child_device=/dev/dri/renderD128",
         "-i", "in.mkv", "-c:a", "copy", "-c:s", "copy", "-c:t", "copy",
-        "-c:v:0", "hevc_qsv", "-preset", "slow", "-global_quality", "25",
+        "-c:v:0", "hevc_qsv", "-preset", "slow", "-global_quality", "19",
         "-pix_fmt:v:0", "nv12", "-profile:v:0", "main",
         "-map_metadata", "0", "-map_chapters", "0", "-max_muxing_queue_size", "4096", "out.mkv",
     ]
