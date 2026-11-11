@@ -1,0 +1,50 @@
+# ShelfSaver container image (Linux, Intel Quick Sync or NVIDIA NVENC).
+#
+# Base: Debian 13 ("trixie"). Chosen for its FFmpeg: 7.1 or newer is needed because FFmpeg 6.1
+# (Ubuntu 24.04's) drops HDR10 metadata when encoding with hevc_nvenc; 8.x keeps it.
+# Debian's FFmpeg is built with both hevc_nvenc and hevc_qsv, so one image serves both GPUs.
+FROM debian:trixie-slim
+
+# non-free is needed only for intel-media-va-driver-non-free (Intel's complete media driver).
+# --no-install-recommends keeps the image small; each package below is there for a reason:
+#   ffmpeg                   the encoder itself (+ ffprobe)
+#   python3 / python3-venv   ShelfSaver is Python; the venv keeps its libraries off the system's
+#   libvpl2, libmfx-gen1.2   oneVPL runtime FFmpeg's Quick Sync support loads at run time
+#   intel-media-va-driver-non-free  Intel's driver for the above (Quick Sync only)
+#   vainfo                   lets ShelfSaver name the Intel GPU in its status (see encoders.py)
+RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ffmpeg python3 python3-venv libvpl2 libmfx-gen1.2 intel-media-va-driver-non-free vainfo \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY shelfsaver ./shelfsaver
+RUN python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir . \
+ && rm -rf /app/build
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
+
+# Settings for a container. All can be overridden at `docker run` / in the Unraid template.
+ENV PATH="/opt/venv/bin:$PATH" \
+    SHELFSAVER_DATA=/config \
+    SHELFSAVER_MEDIA_ROOTS=/media \
+    SHELFSAVER_SCRATCH_ROOTS=/scratch \
+    SHELFSAVER_LOG_STDOUT=1 \
+    PUID=99 PGID=100 UMASK=022 \
+    NVIDIA_DRIVER_CAPABILITIES=video,utility \
+    NVIDIA_VISIBLE_DEVICES=all
+
+EXPOSE 8642
+VOLUME /config
+
+# "Is the web server answering?" Plain TCP connect, so no login is involved and no extra
+# endpoint is needed. Reads the port the same way the app does.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+  CMD python3 -c "import os,socket; socket.create_connection(('127.0.0.1', int(os.environ.get('SHELFSAVER_PORT') or 8642)), 3).close()"
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["python3", "-m", "shelfsaver"]

@@ -84,11 +84,15 @@ libraries, holding folders and scratch disks are never touched.
 
 ## Running on Linux (preview)
 
-ShelfSaver now starts and runs on Linux. This is a first step: there is no installer, service
-file or container image yet. Converting needs either an NVIDIA card (NVENC, the default) or an
-Intel GPU (Quick Sync, see below) with a matching FFmpeg. A Docker image is planned next.
-Everything below has been run on Debian with the test suite and an end-to-end check of the real
-app. NVENC on Linux has not been tried; Quick Sync on Linux has (Intel UHD 770).
+ShelfSaver now starts and runs on Linux, and there is a Docker image (next section). Converting
+needs either an NVIDIA card (NVENC, the default) or an Intel GPU (Quick Sync, see below) with a
+matching FFmpeg. The test suite and an end-to-end check of the real app have been run on Debian
+and Ubuntu; NVENC has run on Linux through the 12 GPU tests (RTX 5070 Ti, FFmpeg 7.1.5 inside the
+image), Quick Sync on Linux on an Intel UHD 770.
+
+**FFmpeg version matters for HDR.** FFmpeg 6.1 (the one in Ubuntu 24.04) silently drops the HDR10
+mastering and light-level metadata when encoding with `hevc_nvenc`; 7.1.5, 8.0.1 and 9.0.2 keep it.
+Use 7.1 or newer. The Docker image does.
 
 Install FFmpeg and Python 3.10 or newer, then from this folder:
 
@@ -108,6 +112,42 @@ SHELFSAVER_DATA=/var/lib/shelfsaver SHELFSAVER_MEDIA_ROOTS=/media SHELFSAVER_SCR
 
 The same names can go in `config.json` in the data folder as `media_roots`, `scratch_roots`,
 `port`, `encoder` and `qsv_device`; the environment wins if both are set.
+
+### Docker (Unraid, or any Linux host)
+
+The `Dockerfile` builds an image with FFmpeg 7.1 (both `hevc_nvenc` and `hevc_qsv`), Intel's media
+driver and ShelfSaver. It is about 950 MB, almost all of it FFmpeg's libraries.
+
+```bash
+docker build -t shelfsaver .
+# Intel Quick Sync:
+docker run -d --name shelfsaver -p 8642:8642 --device /dev/dri   -e SHELFSAVER_ENCODER=qsv -e PUID=99 -e PGID=100   -v /path/to/appdata:/config -v /path/to/media:/media -v /path/to/scratch:/scratch shelfsaver
+# NVIDIA (needs the NVIDIA Container Toolkit; leave SHELFSAVER_ENCODER unset):
+docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100   -v /path/to/appdata:/config -v /path/to/media:/media shelfsaver
+```
+
+| Setting | What it does |
+|---|---|
+| `/config` | Settings, history, login and the log. Keep it on persistent storage. |
+| `/media` | Where the libraries are (`SHELFSAVER_MEDIA_ROOTS` already points here). |
+| `/scratch` | Optional fast work disk (`SHELFSAVER_SCRATCH_ROOTS` already points here). |
+| `PUID` / `PGID` | The user and group ShelfSaver runs as. Default 99 / 100 (Unraid's nobody / users). Use the owner of your library so nothing else loses access to converted files. |
+| `UMASK` | Permissions for files the container itself creates. Default 022. Converted files copy the original's permissions instead. |
+
+- The container starts as root only to fix the ownership of `/config` and to join the group that
+  owns the GPU device (read from the device, since its number differs between hosts), then drops to
+  `PUID:PGID`. Starting it with Docker's `user:` option instead also works.
+- Logs go to the container's output (`docker logs`) and also to the log file the web page reads.
+- `docker stop` shuts down in order and exits 0. The health check only asks whether the web page
+  answers.
+- **Unraid:** `docker/shelfsaver-unraid.xml` is a template; copy it to
+  `/boot/config/plugins/dockerMan/templates-user/`. Its image name is a placeholder until the image
+  is published somewhere. For NVIDIA add `--runtime=nvidia` to Extra Parameters and remove the
+  `/dev/dri` device.
+- **What has been run:** the image was built and started, ran as a chosen user, stopped cleanly,
+  and passed the 12 NVENC tests inside the container (GPU passed through from WSL2). The
+  `--gpus all` / NVIDIA Container Toolkit route and Quick Sync inside the container on an Intel host
+  have not been run yet. On Windows, use the Windows install rather than Docker.
 
 ### Intel Quick Sync (QSV)
 

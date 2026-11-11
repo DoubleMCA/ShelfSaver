@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<!--
+  Unraid Docker template for ShelfSaver.
+
+  How to use: copy this file to /boot/config/plugins/dockerMan/templates-user/ on the server,
+  then Docker tab > Add Container > pick "ShelfSaver" from the template list.
+
+  NOTE for the owner: <Repository> is a placeholder. It must point at wherever the image is
+  published (for example a GitHub Container Registry path); until then, build the image
+  locally (`docker build -t shelfsaver .`) and put that name here.
+-->
+<Container version="2">
+  <Name>ShelfSaver</Name>
+  <Repository>ghcr.io/jasonadams1301-web/shelfsaver:latest</Repository>
+  <Registry>https://github.com/jasonadams1301-web/ShelfSaver</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/jasonadams1301-web/ShelfSaver/issues</Support>
+  <Project>https://github.com/jasonadams1301-web/ShelfSaver</Project>
+  <Overview>Watches your video library folders and converts worthwhile files to H.265 on the GPU, checking each result before it replaces the original. Intel Quick Sync (pass /dev/dri) or NVIDIA NVENC (add --runtime=nvidia to Extra Parameters).</Overview>
+  <Category>MediaApp:Video Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8642]/</WebUI>
+  <!-- NVIDIA users: add the runtime=nvidia option (two dashes in front) here and install the Nvidia Driver plugin. Leave empty for Intel. -->
+  <ExtraParams></ExtraParams>
+  <PostArgs></PostArgs>
+  <Config Name="Web UI port" Target="8642" Default="8642" Mode="tcp" Description="Port of the web page." Type="Port" Display="always" Required="true" Mask="false">8642</Config>
+  <Config Name="Settings (config)" Target="/config" Default="/mnt/user/appdata/shelfsaver" Mode="rw" Description="Settings, history and the login. Keep this on the cache/appdata pool." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/shelfsaver</Config>
+  <Config Name="Media" Target="/media" Default="" Mode="rw" Description="The folder that holds your libraries (mount the parent so every library is inside it). Converted files replace the originals here." Type="Path" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="Scratch (work folder)" Target="/scratch" Default="" Mode="rw" Description="Optional fast disk for the work-in-progress files, e.g. a cache pool path. Must be on the same kind of storage you are happy to fill temporarily." Type="Path" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Intel GPU (Quick Sync)" Target="/dev/dri" Default="/dev/dri" Mode="" Description="Intel Quick Sync. Remove this device if you use NVIDIA." Type="Device" Display="always" Required="false" Mask="false">/dev/dri</Config>
+  <Config Name="Encoder" Target="SHELFSAVER_ENCODER" Default="qsv" Mode="" Description="qsv = Intel Quick Sync, nvenc = NVIDIA." Type="Variable" Display="always" Required="true" Mask="false">qsv</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User the container runs as. 99 is Unraid's 'nobody'. Converted files get the original file's owner either way." Type="Variable" Display="advanced" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group the container runs as. 100 is Unraid's 'users'." Type="Variable" Display="advanced" Required="true" Mask="false">100</Config>
+  <Config Name="UMASK" Target="UMASK" Default="022" Mode="" Description="Permissions mask for files the container creates itself (not for converted files, which copy the original's)." Type="Variable" Display="advanced" Required="true" Mask="false">022</Config>
+  <Config Name="NVIDIA devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="NVIDIA only: which GPU to use ('all' or the GPU UUID from the Nvidia Driver plugin)." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+</Container>

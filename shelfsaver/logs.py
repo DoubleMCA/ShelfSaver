@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -29,6 +31,16 @@ def _log_path(data_dir: Path) -> Path:
     return Path(data_dir) / "logs" / LOG_NAME
 
 
+def _wants_stdout() -> bool:
+    """True when SHELFSAVER_LOG_STDOUT is set to anything but empty/0/false/no.
+
+    Why: a container's log is whatever the program writes to stdout/stderr (`docker logs`, the
+    Unraid log button). The rotating file in the data folder stays too, because the web page's
+    log viewer reads it back. The Docker image sets this variable; a plain install does not.
+    """
+    return os.environ.get("SHELFSAVER_LOG_STDOUT", "").strip().lower() not in ("", "0", "false", "no")
+
+
 def setup_logging(data_dir: Path) -> None:
     path = _log_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,6 +57,13 @@ def setup_logging(data_dir: Path) -> None:
     )
     setattr(handler, _HANDLER_TAG, True)
     root.addHandler(handler)
+    if _wants_stdout():
+        # Same format as the file, so the two never disagree. Tagged like the file handler so a
+        # second setup_logging() call replaces it instead of printing every line twice.
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(handler.formatter)
+        setattr(console, _HANDLER_TAG, True)
+        root.addHandler(console)
     logging.getLogger("uvicorn.access").addFilter(_QUIET_PAGE_REFRESHES)
     if root.level == logging.NOTSET or root.level > logging.INFO:
         root.setLevel(logging.INFO)

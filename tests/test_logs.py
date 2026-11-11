@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 from pathlib import Path
 
 import pytest
@@ -92,3 +93,34 @@ def test_a_gap_in_the_files_does_not_hide_older_ones(tmp_path):
 def test_no_logs_at_all_is_an_empty_list(tmp_path):
     assert tail_log(tmp_path, 10) == []
     assert tail_log(tmp_path, 0) == []
+
+
+def _our_handlers():
+    return [h for h in logging.getLogger().handlers if getattr(h, "_shelfsaver_handler", False)]
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no"])
+def test_stdout_logging_is_off_unless_asked_for(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("SHELFSAVER_LOG_STDOUT", value)
+    setup_logging(tmp_path)
+    try:
+        assert [type(h) for h in _our_handlers()] == [logging.handlers.RotatingFileHandler]
+    finally:
+        setup_logging(tmp_path)  # leave no handler pointing at tmp_path for other tests
+
+
+def test_stdout_logging_adds_a_console_handler_once(tmp_path, monkeypatch, capsys):
+    """Containers read stdout; calling setup twice must not print every line twice."""
+    monkeypatch.setenv("SHELFSAVER_LOG_STDOUT", "1")
+    setup_logging(tmp_path)
+    setup_logging(tmp_path)
+    try:
+        kinds = sorted(type(h).__name__ for h in _our_handlers())
+        assert kinds == ["RotatingFileHandler", "StreamHandler"]
+        logging.getLogger("shelfsaver.test").info("hello container")
+        assert capsys.readouterr().out.count("hello container") == 1
+        # The file copy is still written: the web page's log viewer reads it.
+        assert any("hello container" in ln for ln in tail_log(tmp_path, 10))
+    finally:
+        monkeypatch.delenv("SHELFSAVER_LOG_STDOUT")
+        setup_logging(tmp_path)
