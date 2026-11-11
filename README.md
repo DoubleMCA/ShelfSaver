@@ -146,6 +146,10 @@ docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100  
   `/boot/config/plugins/dockerMan/templates-user/`. Its image name is a placeholder until the image
   is published somewhere. For NVIDIA add `--runtime=nvidia` to Extra Parameters and remove the
   `/dev/dri` device.
+- **Licences:** the image includes Intel's media driver (`intel-media-va-driver-non-free`), which
+  Debian keeps in its non-free section because parts of it ship without source code. Intel allows
+  it to be shared; its licence is in `/usr/share/doc/intel-media-va-driver-non-free/copyright`
+  inside the image.
 - **What has been run:** the image was built and started, ran as a chosen user, stopped cleanly,
   and passed the 12 NVENC tests inside the container (GPU passed through from WSL2). The
   `--gpus all` / NVIDIA Container Toolkit route and Quick Sync inside the container on an Intel host
@@ -159,8 +163,13 @@ Set `SHELFSAVER_ENCODER=qsv`. Needs an Intel GPU and an FFmpeg built with `hevc_
   `intel-media-va-driver-non-free libvpl2 libmfx-gen1.2`; the driver is in the non-free
   component). ShelfSaver must be able to open the render node, so in Docker pass the device in
   (`--device /dev/dri/renderD128`).
-- **Windows:** uses D3D11, selected automatically. **This path has not been run on an Intel GPU**;
-  the option used is the one FFmpeg documents.
+- **Windows:** uses D3D11, selected automatically. Checked on an Intel Arc Pro B70 in a PC that
+  also has an AMD card: the Intel GPU was found on its own, so `SHELFSAVER_QSV_DEVICE` is only
+  needed to choose between two Intel GPUs. The installer does not switch to Quick Sync yet: add
+  `"encoder": "qsv"` to `C:\ProgramData\ShelfSaver\config.json`, then restart ShelfSaver.
+- **Checked on Windows (Intel Arc Pro B70):** ShelfSaver's own command and checks passed on 8-bit
+  MKV and MP4 (`hvc1` tag), interlaced (deinterlaced) and 10-bit HDR10 sources, with the HDR10
+  colour tags, mastering display and light level data kept.
 - **Checked on Linux (Intel UHD 770):** ShelfSaver itself scanned, converted, verified and replaced
   an 8-bit MKV. The 10-bit, MP4 (`hvc1` tag, HDR colour tags) and deinterlace cases were run as the
   same ffmpeg commands directly, not yet through ShelfSaver's own conversion.

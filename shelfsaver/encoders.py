@@ -122,9 +122,9 @@ class Qsv(Encoder):
 
     Checked two ways: against FFmpeg's own documentation (the "QSV Encoders" section and the
     `-init_hw_device` section of ffmpeg.texi) and by encoding on real hardware (an Intel UHD 770
-    under Linux, FFmpeg 7.1 with Intel's iHD driver). The Windows device option is the documented
-    one, but was NOT run: no Intel GPU was available there. The PR description lists exactly what
-    was and was not tested.
+    under Linux, FFmpeg 7.1 with Intel's iHD driver; an Intel Arc Pro B70 under Windows 11,
+    FFmpeg 9.0.2, in a PC whose first D3D11 adapter is an AMD card, which the default spec skipped
+    on its own).
 
     How it differs from NVENC:
     - Device: NVENC needs none. QSV is started on a named device, which is operating-system
@@ -200,7 +200,7 @@ class Qsv(Encoder):
 
     def device_info(self, run_tool: RunTool) -> dict:
         if hostos.IS_WINDOWS:
-            return {"available": None, "name": None, "driver": None}  # not probed; see class note
+            return {"available": None, "name": None, "driver": None}  # not probed on Windows
         device = self._linux_device()
         if not os.access(device, os.R_OK | os.W_OK):
             return {"available": False, "name": None, "driver": None}
