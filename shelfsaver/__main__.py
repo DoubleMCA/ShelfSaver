@@ -55,6 +55,21 @@ def stop_on_sigterm(stop: threading.Event) -> None:
         signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
 
 
+def server_options(config) -> dict:
+    """The network-facing uvicorn settings, kept in one place so a test can see them.
+
+    X-Forwarded-* headers say "the real visitor is X, and used HTTPS". They are only a claim by
+    whoever sent them, so with no `trusted_proxies` configured they are not believed at all
+    (proxy_headers off). When proxies are listed, only those addresses are believed; believing
+    anyone would let a visitor choose the address the login rate limit sees. (uvicorn's own
+    default would trust loopback, which is wrong here: a same-machine program is not a proxy
+    unless the person said so.)
+    """
+    return {"host": config.host, "port": config.port, "log_config": None,
+            "proxy_headers": bool(config.trusted_proxies),
+            "forwarded_allow_ips": config.trusted_proxies or None}
+
+
 def main() -> None:
     config = load_config()
     lock = acquire_instance_lock(config.data_dir)
@@ -77,8 +92,7 @@ def main() -> None:
         thread.start()
     try:
         server = uvicorn.Server(uvicorn.Config(
-            create_app(db, worker, scanner, config), host="0.0.0.0", port=config.port,
-            log_config=None))
+            create_app(db, worker, scanner, config), **server_options(config)))
         server.run()
     finally:
         stop.set()

@@ -1,6 +1,7 @@
 """Application configuration."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 from dataclasses import dataclass, field
@@ -13,6 +14,16 @@ from .encoders import DEFAULT_NAME, ENCODERS
 class Config:
     data_dir: Path
     port: int = 8642
+    # Which network address the web page listens on. 0.0.0.0 = every network the machine is on
+    # (what ShelfSaver has always done, and what a container needs, because Docker's port
+    # mapping arrives on the container's own network). 127.0.0.1 = only this machine, for someone
+    # who puts a reverse proxy in front on the same machine.
+    host: str = "0.0.0.0"
+    # Reverse proxies allowed to tell ShelfSaver the real client address and whether the visitor
+    # used HTTPS (via X-Forwarded-For / X-Forwarded-Proto). Comma-separated addresses or networks,
+    # or "*". Empty = trust nobody, which is the safe default: a header from an untrusted sender
+    # is just a claim, and believing it would let anyone dodge the login rate limit.
+    trusted_proxies: str = ""
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     # Which hardware encoder to use: a key of encoders.ENCODERS.
@@ -54,6 +65,35 @@ def _valid_port(value) -> int | None:
     return port if 1 <= port <= 65535 and not isinstance(value, bool) else None
 
 
+def _valid_host(value) -> str | None:
+    """A listen address (IPv4 or IPv6 literal), or None. A hostname is refused on purpose: which
+    address it resolves to can change, and a typo should fall back to the default, not stop the
+    web page from starting."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return None
+
+
+def _valid_proxies(value) -> str | None:
+    """A comma-separated list of addresses/networks (or "*"), normalised, or None if any entry is
+    bad. All-or-nothing: silently dropping one bad entry could trust more or fewer proxies than
+    the person meant."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    entries = [part.strip() for part in value.split(",")]
+    for entry in entries:
+        if entry == "*":
+            continue
+        try:
+            ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            return None
+    return ",".join(entries)
+
+
 def _clean_roots(values) -> list:
     """Keep only non-empty strings, so a bad config.json entry cannot break startup."""
     return [v.strip() for v in values if isinstance(v, str) and v.strip()]
@@ -83,6 +123,10 @@ def load_config() -> Config:
             cfg.qsv_device = str(device).strip()
         if _valid_port(data.get("port")):
             cfg.port = _valid_port(data["port"])
+        if _valid_host(data.get("host")):
+            cfg.host = _valid_host(data["host"])
+        if _valid_proxies(data.get("trusted_proxies")):
+            cfg.trusted_proxies = _valid_proxies(data["trusted_proxies"])
     # The environment wins over the file: in a container it is the normal way to configure,
     # and it lets the same image point at different media without editing a file.
     for key, variable in (("media_roots", "SHELFSAVER_MEDIA_ROOTS"),
@@ -97,4 +141,8 @@ def load_config() -> Config:
         cfg.qsv_device = os.environ["SHELFSAVER_QSV_DEVICE"].strip()
     if _valid_port(os.environ.get("SHELFSAVER_PORT")):
         cfg.port = _valid_port(os.environ["SHELFSAVER_PORT"])
+    if _valid_host(os.environ.get("SHELFSAVER_HOST")):
+        cfg.host = _valid_host(os.environ["SHELFSAVER_HOST"])
+    if _valid_proxies(os.environ.get("SHELFSAVER_TRUSTED_PROXIES")):
+        cfg.trusted_proxies = _valid_proxies(os.environ["SHELFSAVER_TRUSTED_PROXIES"])
     return cfg

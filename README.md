@@ -103,11 +103,13 @@ SHELFSAVER_DATA=/var/lib/shelfsaver SHELFSAVER_MEDIA_ROOTS=/media SHELFSAVER_SCR
 | `SHELFSAVER_SCRATCH_ROOTS` | Folders the scratch disk may be in. Required before a scratch disk can be chosen. |
 | `SHELFSAVER_DATA` | Where settings, history and the login are kept. Default `~/.local/share/ShelfSaver`. |
 | `SHELFSAVER_PORT` | Web page port. Default 8642. |
+| `SHELFSAVER_HOST` | Network address the web page listens on. Default `0.0.0.0` (every network). Use `127.0.0.1` to allow only this machine, e.g. behind a reverse proxy on the same machine. |
+| `SHELFSAVER_TRUSTED_PROXIES` | Reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are believed (comma-separated addresses or networks, or `*`). Default: none. See "Security notes" below. |
 | `SHELFSAVER_ENCODER` | `nvenc` (default) or `qsv`. Works on Windows and Linux. |
 | `SHELFSAVER_QSV_DEVICE` | Quick Sync only. Linux: the render node, default `/dev/dri/renderD128`. Windows: the DirectX adapter number, only needed if the PC has more than one GPU. |
 
 The same names can go in `config.json` in the data folder as `media_roots`, `scratch_roots`,
-`port`, `encoder` and `qsv_device`; the environment wins if both are set.
+`port`, `host`, `trusted_proxies`, `encoder` and `qsv_device`; the environment wins if both are set.
 
 ### Intel Quick Sync (QSV)
 
@@ -156,6 +158,26 @@ Things that differ from Windows, and why:
 - **Logs.** Logs go to `logs/shelfsaver.log` in the data folder, not to the terminal.
 - **Unraid.** Tested on Unraid's share layer: file identity survives renames and the no-replace
   rename works, which the replace step depends on.
+
+## Security notes
+
+ShelfSaver has a password (set on first visit), allows 5 failed logins a minute per address and
+signs the browser in with a cookie that JavaScript cannot read. For anything beyond a trusted home
+network:
+
+- **Use HTTPS in front of it** (a reverse proxy). The page itself speaks plain HTTP, so a password
+  typed on an untrusted network can be read. Over HTTPS the sign-in cookie is marked `Secure`
+  automatically, so the browser never sends it over plain HTTP.
+- **Tell it which proxy to believe** with `SHELFSAVER_TRUSTED_PROXIES` (the proxy's address as
+  ShelfSaver sees it; in Docker often the network's gateway such as `172.17.0.1`). Without it the
+  `X-Forwarded-*` headers are ignored, so behind a proxy the cookie is not marked `Secure` and the
+  login limit sees the proxy's address, shared by every visitor, instead of each visitor's. Do not
+  use `*` unless only the proxy can reach ShelfSaver's port.
+- Every page and answer carries a Content-Security-Policy (the browser only runs ShelfSaver's own
+  script and refuses to be framed), `X-Content-Type-Options`, `X-Frame-Options` and
+  `Referrer-Policy`. API answers are marked not to be cached, because one contains the MCP token.
+- `GET /healthz` answers `{"ok": true}` without a login, for health checks and uptime monitors.
+  It returns 503 if the database cannot be read and reveals nothing else.
 
 ## Stopping ShelfSaver
 

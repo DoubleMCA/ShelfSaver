@@ -21,6 +21,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, StrictBool
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .. import swap
 from . import folders
@@ -202,6 +204,53 @@ class _FreshStaticFiles(StaticFiles):
         return response
 
 
+# What the browser is allowed to load or do with these pages. Everything is served from this
+# same server (no inline scripts, no outside fonts or images, no frames), so the policy can say so;
+# that way an injected script or a page that embeds this one is stopped by the browser itself.
+# style-src needs 'unsafe-inline' because the progress bar sets its width through a style
+# attribute; inline *styles* cannot run code, inline *scripts* stay blocked.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; "
+    "frame-ancestors 'none'")
+SECURITY_HEADERS = {
+    "Content-Security-Policy": CONTENT_SECURITY_POLICY,
+    # Never guess a different file type from the content (stops a text file being run as script).
+    "X-Content-Type-Options": "nosniff",
+    # Older browsers ignore frame-ancestors; this is the same "no framing" rule for them,
+    # which stops another site from putting an invisible copy of the page under a fake button.
+    "X-Frame-Options": "DENY",
+    # Do not tell other sites which page (and so which library name) a link was clicked from.
+    "Referrer-Policy": "no-referrer",
+}
+
+
+class SecurityHeaders:
+    """ASGI middleware: add the headers above to every response, and mark API answers as
+    not-to-be-stored. The settings answer contains the MCP token, so a browser or proxy cache
+    keeping a copy would keep a copy of the token too."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        is_api = scope["path"].startswith("/api/") or scope["path"].rstrip("/") == "/mcp"
+
+        async def send_with_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in SECURITY_HEADERS.items():
+                    headers.setdefault(name, value)
+                if is_api:
+                    headers.setdefault("Cache-Control", "no-store")
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
 def create_app(db, worker, scanner, config) -> FastAPI:
     mcp_server = build_mcp(db, worker, config)
     mcp_app = mcp_server.streamable_http_app(
@@ -241,11 +290,16 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         if not signed_in(request):
             raise _fail(401, "Please sign in.")
 
-    def start_session(response: Response) -> None:
+    def start_session(request: Request, response: Response) -> None:
         token = secrets.token_urlsafe(32)
         db.add_session(_token_hash(token), time.time() + SESSION_SECONDS)
+        # `secure` makes the browser send the cookie only over HTTPS, so it can never leak over
+        # plain HTTP. It can only be set when the visit really was HTTPS: on a plain-HTTP home
+        # network the browser would refuse to store a Secure cookie and nobody could sign in.
+        # Behind a reverse proxy the scheme comes from X-Forwarded-Proto, which uvicorn honours
+        # only for proxies listed in `trusted_proxies`.
         response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_SECONDS, httponly=True,
-                            samesite="strict", path="/")
+                            samesite="strict", path="/", secure=request.url.scheme == "https")
 
     def client_key(request: Request) -> str:
         return request.client.host if request.client else "unknown"
@@ -259,13 +313,13 @@ def create_app(db, worker, scanner, config) -> FastAPI:
                 "signed_in": signed_in(request)}
 
     @open_api.post("/setup")
-    def auth_setup(body: PasswordBody, response: Response):
+    def auth_setup(body: PasswordBody, request: Request, response: Response):
         if len(body.password) < MIN_PASSWORD_LENGTH:
             raise _fail(400, f"Choose a password of at least {MIN_PASSWORD_LENGTH} characters.")
         # One statement decides who sets the first password, so two requests can't both win.
         if not db.set_setting_if_absent("password_hash", hash_password(body.password)):
             raise _fail(409, "A password is already set. Sign in instead.")
-        start_session(response)
+        start_session(request, response)
         return {"ok": True}
 
     @open_api.post("/login")
@@ -277,7 +331,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             limiter.record_failure(key)
             raise _fail(401, "That password isn't right.")
         limiter.clear(key)
-        start_session(response)
+        start_session(request, response)
         return {"ok": True}
 
     @open_api.post("/logout")
@@ -769,6 +823,18 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     app.include_router(open_api)
     app.include_router(api)
 
+    # For container health checks and uptime monitors. Needs no sign-in (a monitor has no
+    # password) so it must say nothing about the library, the queue or the settings: only
+    # "the web server answers and the database can be read". 503 if the database cannot.
+    @app.get("/healthz", include_in_schema=False)
+    def healthz():
+        try:
+            db.get_setting("password_hash")
+        except Exception:
+            logger.exception("Health check: the database could not be read")
+            return JSONResponse(status_code=503, content={"ok": False})
+        return {"ok": True}
+
     # The pages hold no private data, so they load before sign-in. Their script asks the API
     # for everything and sends the visitor to /login when the API says 401.
     def page_route(file_name: str):
@@ -783,4 +849,6 @@ def create_app(db, worker, scanner, config) -> FastAPI:
     app.mount("/static", _FreshStaticFiles(directory=STATIC_DIR), name="static")
     # Added last so it wraps everything: /mcp never reaches the pages or the sign-in routes.
     app.add_middleware(McpGate, db=db, mcp_app=mcp_app)
+    # Outermost, so every response (pages, API, /mcp, errors) gets the headers.
+    app.add_middleware(SecurityHeaders)
     return app
