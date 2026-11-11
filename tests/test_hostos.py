@@ -369,7 +369,7 @@ def test_a_refused_owner_or_mode_change_is_reported_but_the_folders_are_still_ma
 
     target = tmp_path / "Library" / "ShelfSaver" / "incoming"
     monkeypatch.setattr(os, "lstat", other_owner)
-    monkeypatch.setattr(os, "chown", refused)
+    monkeypatch.setattr(os, "fchown", refused)
     problems = hostos.make_dirs_like(str(target), str(model))
     monkeypatch.undo()
     assert target.is_dir()                                   # the work still happens
@@ -403,16 +403,44 @@ def test_a_folder_made_by_someone_else_at_the_same_moment_is_left_alone(tmp_path
 
 
 @posix_only
-def test_copy_owner_and_mode_also_handles_folders(tmp_path):
-    source, target = _folder(tmp_path / "s", 0o750), _folder(tmp_path / "t", 0o700)
-    assert hostos.copy_owner_and_mode(str(source), str(target)) == []
-    assert _mode(target) == 0o750
+def test_a_new_folder_is_never_more_open_than_its_model_even_for_an_instant(tmp_path, monkeypatch):
+    model = _folder(tmp_path / "Library", 0o750)
+    modes_asked_for = []
+    real_mkdir = os.mkdir
+
+    def record(path, mode=0o777, *args, **kwargs):
+        modes_asked_for.append(mode)
+        real_mkdir(path, mode)
+
+    monkeypatch.setattr(os, "mkdir", record)
+    hostos.make_dirs_like(str(tmp_path / "Library" / "ShelfSaver" / "incoming"), str(model))
+    assert modes_asked_for == [0o750, 0o750]       # born restricted, never 0o777 and then narrowed
 
 
 @posix_only
-def test_a_file_is_never_given_a_folders_mode_or_the_reverse(tmp_path):
-    folder, file = _folder(tmp_path / "d", 0o750), _file(tmp_path / "f")
-    os.chmod(file, 0o600)
-    assert hostos.copy_owner_and_mode(str(folder), str(file)) == []
-    assert hostos.copy_owner_and_mode(str(file), str(folder)) == []
-    assert _mode(file) == 0o600 and _mode(folder) == 0o750
+def test_a_new_folder_swapped_for_a_link_is_not_followed(tmp_path, monkeypatch):
+    """Between our mkdir and the chown/chmod, a path can be replaced by a link to somewhere else.
+    The change must go nowhere (and be reported), not onto the link's target."""
+    model = _folder(tmp_path / "Library", 0o770)
+    elsewhere = _folder(tmp_path / "Elsewhere", 0o700)
+    target = tmp_path / "Library" / "ShelfSaver"
+    real_mkdir = os.mkdir
+
+    def swap_for_a_link(path, *args, **kwargs):
+        real_mkdir(path, *args)
+        os.rmdir(path)
+        os.symlink(elsewhere, path)
+
+    monkeypatch.setattr(os, "mkdir", swap_for_a_link)
+    problems = hostos.make_dirs_like(str(target), str(model))
+    monkeypatch.undo()
+    assert _mode(elsewhere) == 0o700                   # untouched
+    assert len(problems) == 1 and "safely" in problems[0]
+
+
+@posix_only
+def test_an_unreadable_model_folder_is_reported_and_the_folders_are_still_made(tmp_path):
+    target = tmp_path / "ShelfSaver" / "incoming"
+    problems = hostos.make_dirs_like(str(target), str(tmp_path / "no-such-folder"))
+    assert target.is_dir()
+    assert len(problems) == 1 and "could not read" in problems[0]
