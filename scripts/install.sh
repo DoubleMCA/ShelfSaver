@@ -210,6 +210,7 @@ EOF
 
 SWAPPING=0       # from the swap until success, a failure puts the old version back
 SUCCEEDED=0
+STOPPED_OLD=0    # setup stopped a running ShelfSaver, so a failure must start it again
 OLD_MOVED=0
 NEW_IN_PLACE=0
 CONFIG_WRITTEN=0
@@ -364,8 +365,9 @@ port_in_use() {
 
 swap_in() {
     SWAPPING=1
-    if systemctl list-unit-files "$SERVICE.service" >/dev/null 2>&1; then
-        systemctl stop "$SERVICE" 2>/dev/null || true
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+        STOPPED_OLD=1
+        systemctl stop "$SERVICE"
     fi
     if port_in_use; then
         local owner
@@ -458,7 +460,9 @@ rollback() {
         else systemctl disable --quiet "$SERVICE" 2>/dev/null || true; rm -f -- "$UNIT_PATH"; fi
         systemctl daemon-reload
     fi
-    if [[ $OLD_MOVED -eq 1 && -f "$UNIT_PATH" ]]; then
+    # Start the previous version if it was put back, or if it was only stopped (a failure before
+    # anything moved, such as another program holding the port).
+    if [[ ( $OLD_MOVED -eq 1 || $STOPPED_OLD -eq 1 ) && -f "$UNIT_PATH" ]]; then
         if systemctl start "$SERVICE"; then say "The previous version is running again."
         else warn "The previous version could not be started again: journalctl -u $SERVICE"; fi
     fi

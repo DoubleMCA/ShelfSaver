@@ -168,6 +168,19 @@ def test_service_file(tmp_path):
     assert "Group=users" in r.stdout.splitlines() and "SupplementaryGroups" not in r.stdout
 
 
+def test_rollback_restarts_a_service_stopped_before_the_folders_were_swapped(tmp_path):
+    # An update can fail after the running version was stopped but before anything moved
+    # (another program holding the port). The old version must not stay stopped.
+    unit = tmp_path / "shelfsaver.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    log = tmp_path / "calls.log"
+    r = run_fn(tmp_path, f'systemctl() {{ echo "systemctl $*" >> "{log}"; }}\n'
+                         f'UNIT_PATH="{unit}"; STOPPED_OLD=1; OLD_MOVED=0; NEW_IN_PLACE=0\n'
+                         'rollback')
+    assert r.returncode == 0, r.stderr
+    assert "systemctl start shelfsaver" in log.read_text(encoding="utf-8").splitlines()
+
+
 @pytest.mark.parametrize("path, inside", [
     ("/opt/shelfsaver", True),
     ("/opt/shelfsaver/src", True),
