@@ -109,6 +109,103 @@ inside_app_dir() {
     return 1
 }
 
+# --- Settings and service file ------------------------------------------------------------------
+
+# Write config.json: keep every key already there, set encoder/ffmpeg/ffprobe, and set the media
+# and scratch roots only when given (an update without --media keeps the folders already set).
+# Values reach Python as arguments, never as code. An unreadable file is kept as config.json.bad.
+write_config() {
+    python3 - "$1" "$2" "$3" "$4" "${#MEDIA[@]}" ${MEDIA[@]+"${MEDIA[@]}"} \
+        ${SCRATCH[@]+"${SCRATCH[@]}"} <<'PY'
+import json, os, sys, tempfile
+path, encoder, ffmpeg, ffprobe, count = sys.argv[1:6]
+media = sys.argv[6:6 + int(count)]
+scratch = sys.argv[6 + int(count):]
+config = {}
+if os.path.exists(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            config = json.load(f)
+        if not isinstance(config, dict):
+            raise ValueError("not settings")
+    except ValueError:
+        os.replace(path, path + ".bad")
+        print("NOTE: The old config.json could not be read. It was kept as config.json.bad "
+              "and a new one will be written.")
+        config = {}
+config.update(encoder=encoder, ffmpeg=ffmpeg, ffprobe=ffprobe)
+if media:
+    config["media_roots"] = media
+if scratch:
+    config["scratch_roots"] = scratch
+folder = os.path.dirname(os.path.abspath(path))
+fd, temp = tempfile.mkstemp(dir=folder, prefix=".config-", suffix=".json")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(temp, path)
+PY
+}
+
+# True when config.json already names at least one media folder.
+config_has_media() {
+    [[ -f "$1" ]] || return 1
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        roots = json.load(f).get("media_roots")
+except (ValueError, AttributeError):
+    sys.exit(1)
+sys.exit(0 if isinstance(roots, list) and roots else 1)
+PY
+}
+
+# Group IDs that own the Intel render nodes. Quick Sync opens /dev/dri/renderD*; the service gets
+# these as supplementary groups instead of the account being added to them system-wide.
+render_groups() {
+    local dev gid seen=" "
+    for dev in ${DRI_GLOB:-/dev/dri/renderD*}; do
+        [[ -e "$dev" ]] || continue
+        gid="$(stat -c %g -- "$dev")"
+        [[ "$gid" -eq 0 || "$seen" == *" $gid "* ]] && continue
+        seen+="$gid "
+    done
+    seen="${seen# }"
+    [[ -n "$seen" ]] && printf '%s\n' "${seen% }"
+    return 0
+}
+
+# The systemd service file for USER / GROUP, with the render-node groups GIDS (may be empty).
+service_unit() {
+    cat <<EOF
+[Unit]
+Description=ShelfSaver: converts video libraries to save space
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=$1
+Group=$2
+EOF
+    [[ -n "$3" ]] && printf 'SupplementaryGroups=%s\n' "$3"
+    cat <<EOF
+WorkingDirectory=$APP_DIR
+Environment=SHELFSAVER_DATA=$DATA_DIR
+ExecStart=$APP_DIR/venv/bin/python -m shelfsaver
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 main() {
     parse_args "$@"
 }

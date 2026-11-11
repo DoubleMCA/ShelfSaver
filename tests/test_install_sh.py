@@ -3,6 +3,7 @@ and changes the machine, so the full install is checked end-to-end by hand (see 
 from __future__ import annotations
 
 import getpass
+import json
 import shutil
 import subprocess
 import sys
@@ -87,6 +88,84 @@ def test_owner_with_no_account_asks_for_user(tmp_path):
 def test_ffmpeg_version_check(tmp_path, line, new_enough):
     r = run_fn(tmp_path, f'ffmpeg_new_enough "{line}"')
     assert r.returncode == (0 if new_enough else 1), r.stderr
+
+
+def _write_config(tmp_path, existing, media=(), scratch=()):
+    cfg = tmp_path / "config.json"
+    if existing is not None:
+        cfg.write_text(existing, encoding="utf-8")
+    arrays = "MEDIA=(" + " ".join(f"'{m}'" for m in media) + ")\n"
+    arrays += "SCRATCH=(" + " ".join(f"'{s}'" for s in scratch) + ")\n"
+    r = run_fn(tmp_path, arrays + f'write_config "{cfg}" qsv /usr/bin/ffmpeg /usr/bin/ffprobe')
+    assert r.returncode == 0, r.stderr
+    return cfg, r
+
+
+def test_config_keeps_other_keys_and_sets_ours(tmp_path):
+    cfg, _ = _write_config(tmp_path, '{"port": 9000, "encoder": "nvenc", "media_roots": ["/old"]}',
+                           media=["/srv/my videos/é"])
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    assert data["port"] == 9000 and data["encoder"] == "qsv"
+    assert data["media_roots"] == ["/srv/my videos/é"]
+    assert data["ffmpeg"] == "/usr/bin/ffmpeg" and data["ffprobe"] == "/usr/bin/ffprobe"
+    assert "scratch_roots" not in data
+    assert cfg.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_update_without_media_keeps_the_existing_roots(tmp_path):
+    cfg, _ = _write_config(tmp_path, '{"media_roots": ["/old"], "scratch_roots": ["/s"]}')
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    assert data["media_roots"] == ["/old"] and data["scratch_roots"] == ["/s"]
+
+
+@pytest.mark.parametrize("content", ["{nope", "[1,2]"])
+def test_unreadable_config_is_kept_as_bad(tmp_path, content):
+    cfg, r = _write_config(tmp_path, content, media=["/m"])
+    assert (tmp_path / "config.json.bad").read_text(encoding="utf-8") == content
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    assert data["media_roots"] == ["/m"] and data["encoder"] == "qsv"
+    assert "NOTE:" in r.stdout
+
+
+@pytest.mark.parametrize("content, has", [
+    ('{"media_roots": ["/a"]}', True),
+    ('{"media_roots": []}', False),
+    ('{"port": 1}', False),
+    (None, False),
+])
+def test_config_has_media(tmp_path, content, has):
+    cfg = tmp_path / "config.json"
+    if content is not None:
+        cfg.write_text(content, encoding="utf-8")
+    r = run_fn(tmp_path, f'config_has_media "{cfg}"')
+    assert r.returncode == (0 if has else 1), r.stderr
+
+
+def test_render_groups(tmp_path):
+    for name in ("renderD128", "renderD129"):
+        (tmp_path / name).touch()
+    gid = (tmp_path / "renderD128").stat().st_gid
+    r = run_fn(tmp_path, f'DRI_GLOB="{tmp_path}/renderD*" render_groups')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ([] if gid == 0 else [str(gid)])
+    r = run_fn(tmp_path, f'DRI_GLOB="{tmp_path}/nothing*" render_groups')
+    assert r.returncode == 0 and r.stdout.strip() == ""
+
+
+def test_service_file(tmp_path):
+    r = run_fn(tmp_path, 'service_unit jason jason "44 993"')
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+    for expected in ("User=jason", "Group=jason", "SupplementaryGroups=44 993",
+                     "ExecStart=/opt/shelfsaver/venv/bin/python -m shelfsaver",
+                     "WorkingDirectory=/opt/shelfsaver",
+                     "Environment=SHELFSAVER_DATA=/var/lib/shelfsaver", "Restart=always",
+                     "RestartSec=10", "TimeoutStopSec=60", "NoNewPrivileges=yes",
+                     "ProtectSystem=full", "PrivateTmp=yes", "WantedBy=multi-user.target"):
+        assert expected in lines, expected
+    assert "ProtectHome" not in r.stdout
+    r = run_fn(tmp_path, 'service_unit jason users ""')
+    assert "Group=users" in r.stdout.splitlines() and "SupplementaryGroups" not in r.stdout
 
 
 @pytest.mark.parametrize("path, inside", [
