@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import stat
 import threading
 
 import pytest
@@ -373,3 +374,27 @@ def test_forgetting_saving_results_only_touches_h265_files_that_were_tried(db, l
     reasons = {i: db.get_file(i).reason for i in (sampled, final, h264, other)}
     assert reasons == {sampled: "Already H.265", final: "Already H.265",
                        h264: "Would not save enough", other: "Read-only file"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux-only behaviour")
+def test_the_database_files_are_private_to_their_owner(tmp_path):
+    """The database holds the MCP token in plain text, so a permissive umask must not expose it."""
+    old = os.umask(0o022)
+    try:
+        db = Database(tmp_path / "data" / "shelfsaver.db")
+        db.set_setting("mcp_token", "secret")      # makes the -wal side file appear
+    finally:
+        os.umask(old)
+    for suffix in ("", "-wal", "-shm"):
+        side = tmp_path / "data" / f"shelfsaver.db{suffix}"
+        if side.exists():
+            assert stat.S_IMODE(side.stat().st_mode) == 0o600, side.name
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux-only behaviour")
+def test_a_share_that_refuses_chmod_does_not_stop_startup(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise PermissionError("not allowed")
+
+    monkeypatch.setattr(os, "chmod", refuse)
+    Database(tmp_path / "data" / "shelfsaver.db").set_setting("a", "b")

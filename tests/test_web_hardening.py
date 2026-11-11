@@ -175,3 +175,54 @@ def test_forwarded_https_is_believed_from_a_listed_proxy(parts, tmp_path):
         thread.join(timeout=10)
     assert r.status_code == 200
     assert "secure" in r.headers["set-cookie"].lower().split("; ")
+
+
+# ---- requests that a browser says came from another page
+
+def _signed_in(parts):
+    c = make_client(parts, "http://testserver")
+    assert c.post("/api/auth/setup", json={"password": PASSWORD}).status_code == 200
+    return c
+
+
+@pytest.mark.parametrize("path", ["/api/pause", "/api/resume", "/api/auth/logout"])
+def test_a_bodyless_change_from_another_site_is_refused(parts, path):
+    """The pause/resume/logout endpoints read no body, so nothing else stops a forged form post
+    from another port on the same machine (which the browser treats as the same site)."""
+    with _signed_in(parts) as c:
+        r = c.post(path, headers={"Sec-Fetch-Site": "same-site"})
+        assert r.status_code == 403
+        assert c.get("/api/status").status_code == 200       # and it did not sign us out
+    assert r.headers["content-security-policy"] == CONTENT_SECURITY_POLICY
+
+
+def test_pause_really_did_not_run_when_refused(parts):
+    with _signed_in(parts) as c:
+        c.post("/api/pause", headers={"Sec-Fetch-Site": "cross-site"})
+        assert c.get("/api/status").json()["worker"]["state"] != "paused"
+
+
+@pytest.mark.parametrize("site", ["same-origin", "none"])
+def test_our_own_pages_still_work(parts, site):
+    with _signed_in(parts) as c:
+        assert c.post("/api/pause", headers={"Sec-Fetch-Site": site}).status_code == 200
+
+
+def test_an_older_browser_is_judged_by_its_origin_header(parts):
+    with _signed_in(parts) as c:
+        same = c.post("/api/pause", headers={"Origin": "http://testserver"})
+        other = c.post("/api/resume", headers={"Origin": "http://testserver:9999"})
+        hidden = c.post("/api/resume", headers={"Origin": "null"})
+    assert same.status_code == 200
+    assert other.status_code == 403
+    assert hidden.status_code == 403
+
+
+def test_a_script_with_no_browser_headers_is_not_affected(parts):
+    with _signed_in(parts) as c:
+        assert c.post("/api/pause").status_code == 200
+
+
+def test_reading_is_never_refused(parts):
+    with _signed_in(parts) as c:
+        assert c.get("/api/status", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 200
