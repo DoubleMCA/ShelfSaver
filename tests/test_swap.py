@@ -1188,3 +1188,78 @@ def test_an_unreadable_held_entry_does_not_stop_the_rest(tmp_path, monkeypatch):
     monkeypatch.setattr(swap.os, "scandir", Listing)
     items = list(swap._held_items(holding))
     assert [(os.path.basename(p), size) for p, _, size in items] == [("good.bin", 5)]
+
+
+# --- the new file takes the original's owner and permissions (see hostos.copy_owner_and_mode) ---
+
+
+def mode_of(path) -> int:
+    return os.stat(ext_path(path)).st_mode & 0o777
+
+
+@posix_only
+@pytest.mark.parametrize("final_ext,holding", ALL_FOUR_CASES)
+def test_the_new_file_takes_the_originals_permissions(library, final_ext, holding):
+    plan = prepare(library, final_ext, holding)
+    os.chmod(plan.original, 0o640)  # what the library's files look like
+    os.chmod(plan.temp, 0o600)      # what ShelfSaver's own copy would otherwise be
+    execute_swap(plan)
+    assert_finished(plan)
+    assert mode_of(plan.final) == 0o640
+    if holding:
+        assert mode_of(plan.holding) == 0o640  # a moved original keeps its own, untouched
+
+
+@posix_only
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="changing an owner needs root")
+@pytest.mark.parametrize("final_ext,holding", ALL_FOUR_CASES)
+def test_the_new_file_takes_the_originals_owner_and_group(library, final_ext, holding):
+    plan = prepare(library, final_ext, holding)
+    os.chown(plan.original, 12345, 23456)
+    execute_swap(plan)
+    info = os.stat(plan.final)
+    assert (info.st_uid, info.st_gid) == (12345, 23456)
+
+
+@pytest.mark.parametrize("final_ext,holding", ALL_FOUR_CASES)
+def test_a_refused_owner_copy_never_stops_the_swap_and_says_so(library, final_ext, holding, monkeypatch, caplog):
+    monkeypatch.setattr(
+        swap.hostos, "copy_owner_and_mode",
+        lambda source, target: ["owner and group 99:100 were refused (Operation not permitted)"])
+    plan = prepare(library, final_ext, holding)
+    with caplog.at_level("WARNING", logger="shelfsaver.swap"):
+        execute_swap(plan)
+    assert_finished(plan)  # the conversion is worth more than its ownership
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "could not be given the original's owner" in message and "99:100" in message
+
+
+def test_nothing_is_said_when_the_copy_went_well(library, caplog):
+    plan = prepare(library, ".mkv", False)
+    with caplog.at_level("WARNING", logger="shelfsaver.swap"):
+        execute_swap(plan)
+    assert not [r for r in caplog.records if "owner" in r.getMessage()]
+
+
+@posix_only
+def test_a_retry_still_finishes_after_the_new_file_was_made_read_only(library, monkeypatch):
+    # A read-only original gives the new file a read-only mode before the first step. If the power
+    # goes then, the retry must not be refused when it flushes the file (a write open would be, for
+    # anyone but root, and would look like "file in use" forever).
+    plan = prepare(library, ".mp4", False)
+    os.chmod(plan.original, 0o444)
+    with monkeypatch.context() as patch:
+        crash_after(patch, 0)
+        with pytest.raises(SimulatedCrash):
+            execute_swap(plan)
+    assert mode_of(plan.temp) == 0o444 and read_file(plan.original) == OLD
+    execute_swap(plan)
+    assert_finished(plan)
+    assert mode_of(plan.final) == 0o444
+
+
+def test_a_plan_is_not_changed_by_copying_ownership(library):
+    plan = prepare(library, ".mkv", True)
+    before = dataclasses.asdict(plan)
+    execute_swap(plan)
+    assert dataclasses.asdict(plan) == before  # plans are saved and compared; this must not alter one

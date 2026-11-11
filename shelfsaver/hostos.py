@@ -163,6 +163,50 @@ def is_link_like(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode)
 
 
+def copy_owner_and_mode(source: str, target: str) -> list:
+    """Give `target` the owner, group and permission bits of `source`. Returns a list of plain-text
+    problems; empty means everything that needed doing was done. It never raises.
+
+    Why: the converted file is created by ShelfSaver's own process, so left alone it belongs to
+    whoever ShelfSaver runs as (root, in a typical container). Other programs that manage the same
+    library (and people using the share over the network) expect the original's owner, so the
+    new file must match, or they may be unable to rename, replace or delete it.
+
+    Rules, each for a reason:
+    - Windows does nothing. Files there take their access rules from the folder they are in.
+    - Only the nine ordinary permission bits are copied. setuid, setgid and sticky are never
+      carried onto a media file, even if the original somehow had them.
+    - chown is attempted only when the owner or group actually differs, so a correctly configured
+      setup (ShelfSaver already running as the right user) makes no call and no noise.
+    - Changing an owner needs root (or the right group). When it is refused, that is reported as
+      a problem and the caller carries on: a finished conversion is worth more than its ownership.
+    - A source that is not a regular file (a symlink, say) has no meaningful mode to copy.
+    """
+    if IS_WINDOWS:
+        return []
+    problems = []
+    try:
+        wanted = os.lstat(source)
+        have = os.lstat(target)
+    except OSError as exc:
+        return [f"could not read the file details ({exc.strerror or exc})"]
+    if not (stat.S_ISREG(wanted.st_mode) and stat.S_ISREG(have.st_mode)):
+        return []
+    if (wanted.st_uid, wanted.st_gid) != (have.st_uid, have.st_gid):
+        try:
+            os.chown(target, wanted.st_uid, wanted.st_gid, follow_symlinks=False)
+        except OSError as exc:
+            problems.append(f"owner and group {wanted.st_uid}:{wanted.st_gid} were refused ({exc.strerror or exc})")
+    wanted_bits = stat.S_IMODE(wanted.st_mode) & 0o777
+    try:
+        # Read the mode again: a successful chown can clear bits on its own.
+        if stat.S_IMODE(os.lstat(target).st_mode) & 0o777 != wanted_bits:
+            os.chmod(target, wanted_bits)
+    except OSError as exc:
+        problems.append(f"permissions {wanted_bits:o} were refused ({exc.strerror or exc})")
+    return problems
+
+
 def rename_no_replace(source: str, target: str) -> None:
     """Rename, but raise FileExistsError instead of ever replacing an existing `target`.
 
