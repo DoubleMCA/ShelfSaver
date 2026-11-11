@@ -444,3 +444,28 @@ def test_an_unreadable_model_folder_is_reported_and_the_folders_are_still_made(t
     problems = hostos.make_dirs_like(str(target), str(tmp_path / "no-such-folder"))
     assert target.is_dir()
     assert len(problems) == 1 and "could not read" in problems[0]
+
+
+@posix_only
+def test_a_read_only_model_folder_still_lets_us_create_the_chain(tmp_path):
+    """A library's top folder is sometimes made read-only (0555) so it cannot be deleted by
+    mistake. Copying that exactly made our own `ShelfSaver` folder read-only to us, so creating
+    `incoming` inside it failed (as any account but root; root ignores the bits, so the mode is
+    checked directly too)."""
+    model = _folder(tmp_path / "Library", 0o555)
+    # The new folders go under a writable parent: only the model's mode is read-only.
+    outer = _folder(tmp_path / "Outer", 0o755)
+    target = outer / "ShelfSaver" / "incoming"
+    problems = hostos.make_dirs_like(str(target), str(model))
+    assert problems == []
+    assert target.is_dir()
+    assert _mode(outer / "ShelfSaver") == 0o755       # others' bits copied, owner keeps write
+    assert _mode(target) == 0o755
+
+
+@posix_only
+def test_the_owner_keeps_full_access_but_the_others_bits_stay_as_the_model_has_them(tmp_path):
+    model = _folder(tmp_path / "Library", 0o050)      # owner has nothing, the group can read/enter
+    target = tmp_path / "ShelfSaver"
+    hostos.make_dirs_like(str(target), str(model))
+    assert _mode(target) == 0o750

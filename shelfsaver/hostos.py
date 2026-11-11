@@ -226,7 +226,11 @@ def make_dirs_like(path: str, model: str) -> list:
     - If another process creates a folder between our check and our mkdir, that folder is left
       alone too: it is not ours.
     - The folder is created with the model's permission bits from the start (the umask can only
-      narrow them), so it is never, even for an instant, more open than its model.
+      narrow them), so it is never, even for an instant, more open than its model, except for
+      one deliberate addition: the owner always keeps read, write and enter (`| 0o700`). Some
+      people make a library's top folder read-only (0555) so it cannot be deleted by mistake.
+      Copying that exactly would make ShelfSaver's own `ShelfSaver` folder read-only to ShelfSaver,
+      and it could not create `incoming` inside it. The others' bits are still copied as they are.
     - The owner and mode are then applied through an open handle to the folder, opened without
       following links. A path could be swapped for a link to somewhere else between our mkdir and
       a chown/chmod; a handle cannot.
@@ -256,7 +260,7 @@ def make_dirs_like(path: str, model: str) -> list:
             if wanted is None:
                 os.mkdir(folder)
             else:
-                os.mkdir(folder, stat.S_IMODE(wanted.st_mode) & 0o777)
+                os.mkdir(folder, _folder_bits(wanted))
         except FileExistsError:
             if os.path.isdir(folder):
                 continue  # created by someone else just now: not ours to change
@@ -264,6 +268,12 @@ def make_dirs_like(path: str, model: str) -> list:
         if wanted is not None:
             problems += _match_new_folder(wanted, folder)
     return problems
+
+
+def _folder_bits(wanted) -> int:
+    """The nine permission bits for a folder we create: the model's, plus full access for the
+    owner (the account ShelfSaver runs as, once ownership has been matched or kept)."""
+    return (stat.S_IMODE(wanted.st_mode) & 0o777) | 0o700
 
 
 def _match_new_folder(wanted, folder: str) -> list:
@@ -281,7 +291,7 @@ def _match_new_folder(wanted, folder: str) -> list:
                 os.fchown(fd, wanted.st_uid, wanted.st_gid)
             except OSError as exc:
                 problems.append(f"owner and group {wanted.st_uid}:{wanted.st_gid} were refused ({exc.strerror or exc})")
-        wanted_bits = stat.S_IMODE(wanted.st_mode) & 0o777
+        wanted_bits = _folder_bits(wanted)
         try:
             # Read the mode again: a successful chown can clear bits on its own.
             if stat.S_IMODE(os.fstat(fd).st_mode) & 0o777 != wanted_bits:
