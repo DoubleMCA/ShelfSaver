@@ -152,10 +152,17 @@ docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100 \
   `/boot/config/plugins/dockerMan/templates-user/`. Its image name (`ghcr.io/jasonadams1301-web/shelfsaver`)
   will work once the image is published; until then build it yourself as above. For NVIDIA add `--runtime=nvidia` to Extra Parameters and remove the
   `/dev/dri` device.
-- **What has been run:** the image was built and started, ran as a chosen user, stopped cleanly,
-  and passed the 12 NVENC tests inside the container (GPU passed through from WSL2). The
-  `--gpus all` / NVIDIA Container Toolkit route and Quick Sync inside the container on an Intel host
-  have not been run yet. On Windows, use the Windows install rather than Docker.
+- **What has been run** (the image started the normal way, as 99:100, then driven through its own
+  web API: one library per quality level, a synthetic H.264 file in each, converted, verified and
+  swapped in by ShelfSaver itself):
+  - *Quick Sync*, a Linux server with an Intel UHD 770 (`--device /dev/dri`): all three levels converted
+    to H.265, played start to finish, and kept the original's owner and permissions. The health
+    check reported healthy and `docker stop` exited 0.
+  - *NVIDIA*, RTX 5070 Ti through the NVIDIA Container Toolkit (`--gpus all`) under WSL2: the same
+    result. The 12 NVENC tests also pass inside the container.
+  - Not run: a real Unraid install from the template, or an NVIDIA GPU on a native Linux host (WSL2
+    exposes the GPU through `/dev/dxg`, not `/dev/nvidia*`). On Windows, use the Windows install
+    rather than Docker.
 
 ### Intel Quick Sync (QSV)
 
