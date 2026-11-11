@@ -450,6 +450,107 @@ def test_foreign_temp_of_the_same_size_is_refused(library, fake_volume):
     assert snapshot(fake_volume) == before
 
 
+# --- content fingerprint: identity that does not depend on the file system handing out fresh IDs ---
+#
+# ext4 gives a deleted file's ID to the very next new file (measured: 200 of 200 times), so a
+# stranger of the same size can carry the ID we recorded. These tests rewrite a file IN PLACE, which
+# keeps both its ID and its size exactly, on every file system. Only the bytes differ.
+
+
+def rewrite_in_place(path, data: bytes) -> None:
+    with open(ext_path(path), "r+b") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def test_the_plan_carries_a_fingerprint_of_the_new_file(library):
+    plan = prepare(library, ".mkv", False)
+    assert plan.temp_fingerprint == swap.fingerprint(plan.temp)
+    assert len(plan.temp_fingerprint) == 64 and int(plan.temp_fingerprint, 16) >= 0
+
+
+def test_fingerprint_depends_on_content_and_size_and_not_on_name(tmp_path):
+    a = write_file(tmp_path / "a.bin", b"AAAA")
+    same = write_file(tmp_path / "elsewhere" / "other-name.bin", b"AAAA")
+    changed = write_file(tmp_path / "b.bin", b"AAAB")
+    longer = write_file(tmp_path / "c.bin", b"AAAAA")
+    assert swap.fingerprint(a) == swap.fingerprint(same)
+    assert len({swap.fingerprint(p) for p in (a, changed, longer)}) == 3
+
+
+def test_small_files_are_hashed_whole(tmp_path):
+    two_mib = 2 * 1024 * 1024
+    base = write_file(tmp_path / "s.bin", bytes(two_mib))
+    before = swap.fingerprint(base)
+    rewrite_in_place(base, bytes(two_mib // 2) + b"\x01" + bytes(two_mib // 2 - 1))
+    assert swap.fingerprint(base) != before  # a change anywhere shows in a small file
+
+
+def test_large_files_are_sampled_at_the_start_middle_and_end(tmp_path):
+    mib = 1024 * 1024
+    path = write_file(tmp_path / "big.bin", bytes(5 * mib))
+    base = swap.fingerprint(path)
+    # The three sampled stretches of a 5 MiB file are [0, 1), [2, 3) and [4, 5) MiB.
+    for offset in (10, 2 * mib + 10, 5 * mib - 10):
+        data = bytearray(5 * mib)
+        data[offset] = 1
+        rewrite_in_place(path, bytes(data))
+        assert swap.fingerprint(path) != base, f"a change at byte {offset} went unnoticed"
+    # Known, deliberate limit: bytes between the samples are not read. Reading a few MB keeps
+    # the check cheap however large the file is; the size, ID and all three samples must still agree.
+    data = bytearray(5 * mib)
+    data[mib + mib // 2] = 1
+    rewrite_in_place(path, bytes(data))
+    assert swap.fingerprint(path) == base
+
+
+def test_a_new_file_with_the_same_size_and_id_but_other_content_is_refused(library, fake_volume):
+    plan = prepare(library, ".mp4", False)
+    rewrite_in_place(plan.temp, b"X" * plan.expected_size)  # same file ID, same size
+    before = snapshot(fake_volume)
+    with pytest.raises(UnexpectedSwapState):
+        execute_swap(plan)
+    assert snapshot(fake_volume) == before
+    assert read_file(plan.original) == OLD
+
+
+@pytest.mark.parametrize("final_ext,holding", [(".mkv", False), (".mp4", True)])
+def test_a_finished_swap_is_not_reported_when_the_new_file_has_been_rewritten(library, final_ext, holding):
+    plan = prepare(library, final_ext, holding)
+    execute_swap(plan)
+    rewrite_in_place(plan.final, b"X" * plan.expected_size)  # same ID and size, different bytes
+    assert recover_swap(plan) == "unexpected"
+
+
+@pytest.mark.parametrize("final_ext,holding", ALL_FOUR_CASES)
+def test_the_fingerprint_does_not_get_in_the_way_of_a_normal_swap(library, final_ext, holding):
+    plan = prepare(library, final_ext, holding)
+    execute_swap(plan)
+    assert_finished(plan)
+    assert recover_swap(plan) == "finished"  # still recognised after the rename
+
+
+def test_a_plan_without_a_fingerprint_is_still_accepted(library):
+    # A plan saved by an earlier version has none, and is judged on size and ID as it always was.
+    plan = dataclasses.replace(prepare(library, ".mp4", True), temp_fingerprint=None)
+    execute_swap(plan)
+    assert_finished(plan)
+
+
+def test_a_new_file_that_cannot_be_read_is_not_confirmed_and_nothing_moves(library, fake_volume, monkeypatch):
+    plan = prepare(library, ".mp4", False)
+
+    def unreadable(path):
+        raise PermissionError(13, "cannot read")
+
+    monkeypatch.setattr(swap, "fingerprint", unreadable)
+    before = snapshot(fake_volume)
+    with pytest.raises(UnexpectedSwapState):
+        execute_swap(plan)
+    assert snapshot(fake_volume) == before
+
+
 def test_unavailable_file_id_means_identity_is_not_confirmed(library, monkeypatch):
     real_lstat = os.lstat
 

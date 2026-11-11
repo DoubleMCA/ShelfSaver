@@ -213,11 +213,19 @@ def _load_swap(text: Optional[str]) -> tuple[SwapPlan, int, float]:
     data = json.loads(text or "")
     if not isinstance(data, dict):
         raise ValueError("The saved plan is not a record")
-    names = [f.name for f in dataclasses.fields(SwapPlan)]
-    plan = SwapPlan(**{name: data[name] for name in names})
+    # Every field without a default must be present (a missing one means the plan is damaged).
+    # Fields WITH a default may be absent: a plan saved before that field existed is still valid
+    # and must still load, or a swap interrupted across an upgrade could never be finished.
+    kwargs = {
+        f.name: data[f.name] if f.default is dataclasses.MISSING else data.get(f.name, f.default)
+        for f in dataclasses.fields(SwapPlan)
+    }
+    plan = SwapPlan(**kwargs)
     for path in (plan.original, plan.temp, plan.final):
         if not isinstance(path, str):
             raise ValueError("The saved plan has a bad path")
+    if plan.temp_fingerprint is not None and not isinstance(plan.temp_fingerprint, str):
+        raise ValueError("The saved plan has a bad fingerprint")
     return plan, int(data["original_size"]), float(data["original_mtime"])
 
 
