@@ -1,11 +1,18 @@
 # ShelfSaver
 
 ShelfSaver watches the video folders you choose and shrinks the files that are worth
-shrinking by converting them to H.265 on your NVIDIA graphics card. It checks every new file
+shrinking by converting them to H.265 on your graphics card (NVIDIA, or Intel Quick Sync). It checks every new file
 (length, tracks, plays from start to finish, meaningfully smaller) before it replaces the
 original, and it never removes anything you did not agree to.
 
-It runs on one Windows 11 PC with an NVIDIA graphics card, and you use it from a web page.
+You use it from a web page, and it runs on:
+
+- **Windows 11**: see [Install on Windows](#install-on-windows).
+- **Linux** (Debian and Ubuntu), as a service: see [Install as a service](#install-as-a-service-debian-and-ubuntu).
+- **Docker**, including Unraid: the image is `ghcr.io/jasonadams1301-web/shelfsaver`, see
+  [Docker](#docker-unraid-or-any-linux-host).
+
+Windows is where it has run longest. Linux and Docker are newer and have had less real-world use.
 
 **This app is dumb on purpose.** There are no advanced settings and no secret menu of encoder
 knobs. I just wanted to free up some disk space without earning a degree in video compression.
@@ -47,9 +54,10 @@ These show a fresh install with nothing converted yet, and the folder names are 
   they are. This is off unless you turn it on for a library.
 - Offers logs and status over a read-only MCP connection.
 
-## Install
+## Install on Windows
 
-You need Windows 11, an NVIDIA graphics card and an internet connection.
+You need Windows 11, an NVIDIA graphics card (or an Intel GPU, see
+[Intel Quick Sync](#intel-quick-sync-qsv)) and an internet connection.
 
 1. Download or copy this folder to the PC.
 2. Open PowerShell as administrator (right-click PowerShell, choose "Run as administrator").
@@ -70,7 +78,7 @@ To update, get the newer copy of this folder and run the same command again. The
 is built first, then swapped in; if anything goes wrong the old version is put back. Your data
 is left alone. Run setup from a folder outside `C:\Program Files\ShelfSaver`.
 
-## Uninstall
+## Uninstall on Windows
 
 In PowerShell as administrator:
 
@@ -82,7 +90,7 @@ This stops ShelfSaver and removes the startup task, the firewall rule and the pr
 Your settings and history are kept. To delete those too, add `-RemoveData`. Your video
 libraries, holding folders and scratch disks are never touched.
 
-## Running on Linux (preview)
+## Running on Linux and Docker
 
 ShelfSaver runs on Linux as a service (installer below), by hand, or in Docker. Converting
 needs either an NVIDIA card (NVENC, the default) or an Intel GPU (Quick Sync, see below) with a
@@ -163,19 +171,26 @@ The same names can go in `config.json` in the data folder as `media_roots`, `scr
 
 ### Docker (Unraid, or any Linux host)
 
-The `Dockerfile` builds an image with FFmpeg 7.1 (both `hevc_nvenc` and `hevc_qsv`), Intel's media
-driver and ShelfSaver. It is about 950 MB, almost all of it FFmpeg's libraries.
+The image is published as `ghcr.io/jasonadams1301-web/shelfsaver` (`latest`, or a version such as
+`0.6.2`). It has FFmpeg 7.1 (both `hevc_nvenc` and `hevc_qsv`), Intel's media driver and
+ShelfSaver, and is about 950 MB, almost all of it FFmpeg's libraries. Each release publishes a new
+image, and the latest release is rebuilt every week to pick up Debian's security fixes.
 
 ```bash
-docker build -t shelfsaver .
 # Intel Quick Sync:
 docker run -d --name shelfsaver -p 8642:8642 --device /dev/dri \
   -e SHELFSAVER_ENCODER=qsv -e PUID=99 -e PGID=100 \
-  -v /path/to/appdata:/config -v /path/to/media:/media -v /path/to/scratch:/scratch shelfsaver
+  -v /path/to/appdata:/config -v /path/to/media:/media -v /path/to/scratch:/scratch \
+  ghcr.io/jasonadams1301-web/shelfsaver:latest
 # NVIDIA (needs the NVIDIA Container Toolkit; leave SHELFSAVER_ENCODER unset):
 docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100 \
-  -v /path/to/appdata:/config -v /path/to/media:/media shelfsaver
+  -v /path/to/appdata:/config -v /path/to/media:/media \
+  ghcr.io/jasonadams1301-web/shelfsaver:latest
 ```
+
+To build the image yourself instead, run `docker build -t shelfsaver .` in this folder and use
+`shelfsaver` as the image name. To update, pull the image again and recreate the container; your
+settings and history in `/config` are kept.
 
 | Setting | What it does |
 |---|---|
@@ -195,9 +210,8 @@ docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100 \
   Quick Sync) under Intel's licence. The licence text is in the image at
   `/usr/share/doc/intel-media-va-driver-non-free/copyright`.
 - **Unraid:** `docker/shelfsaver-unraid.xml` is a template; copy it to
-  `/boot/config/plugins/dockerMan/templates-user/`. Its image name (`ghcr.io/jasonadams1301-web/shelfsaver`)
-  will work once the image is published; until then build it yourself as above. For NVIDIA add `--runtime=nvidia` to Extra Parameters and remove the
-  `/dev/dri` device.
+  `/boot/config/plugins/dockerMan/templates-user/`. It uses the published image. For NVIDIA add
+  `--runtime=nvidia` to Extra Parameters and remove the `/dev/dri` device.
 - **What has been run** (the image started the normal way, as 99:100, then driven through its own
   web API: one library per quality level, a synthetic H.264 file in each, converted, verified and
   swapped in by ShelfSaver itself):
