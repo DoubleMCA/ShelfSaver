@@ -47,6 +47,7 @@ from .swap import (
     is_volume_root,
     make_plan,
     recover_swap,
+    refuse_linked_work_folders,
     work_root,
 )
 from .verify import HDR_TRANSFERS, verify_output
@@ -850,6 +851,8 @@ class Worker:
         temp = incoming / f"{_temp_stem(job.run.id, job.run.started_at)}{job.output.suffix}"
         job.temp = temp
         try:
+            # Never build into a work folder that has been replaced by a link.
+            refuse_linked_work_folders(work_root(job.library.path), incoming)
             # Made like the library folder, so its owner can still open and clean up
             # `ShelfSaver/incoming` (see hostos.make_dirs_like).
             problems = hostos.make_dirs_like(ext_path(incoming), ext_path(job.library.path))

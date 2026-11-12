@@ -469,3 +469,23 @@ def test_the_owner_keeps_full_access_but_the_others_bits_stay_as_the_model_has_t
     target = tmp_path / "ShelfSaver"
     hostos.make_dirs_like(str(target), str(model))
     assert _mode(target) == 0o750
+
+
+@posix_only
+def test_the_sticky_bit_is_kept_so_a_new_folder_is_never_more_open_than_its_model(tmp_path):
+    """A sticky folder (like /tmp) stops people deleting each other's files. Copying only the nine
+    ordinary bits turned a 1777 model into a plain 0777 folder, where anyone could delete the
+    held originals of someone else. setuid and setgid still are not carried (see above)."""
+    model = _folder(tmp_path / "Library", 0o1777)
+    target = tmp_path / "Library" / "ShelfSaver" / "incoming"
+    hostos.make_dirs_like(str(target), str(model))
+    for folder in (target, target.parent):
+        assert os.stat(folder).st_mode & 0o7777 == 0o1777, folder
+
+
+@posix_only
+def test_sticky_is_kept_but_setgid_is_still_dropped_together(tmp_path):
+    model = _folder(tmp_path / "Library", 0o3775)     # setgid + sticky share folder
+    target = tmp_path / "Library" / "ShelfSaver"
+    hostos.make_dirs_like(str(target), str(model))
+    assert os.stat(target).st_mode & 0o7777 == 0o1775

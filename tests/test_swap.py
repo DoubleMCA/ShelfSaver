@@ -1309,3 +1309,42 @@ def test_a_refused_folder_ownership_never_stops_the_swap_and_says_so(library, mo
     assert_finished(plan)  # held originals and the new file are worth more than folder ownership
     message = " ".join(r.getMessage() for r in caplog.records)
     assert "holding folder" in message and "99:100" in message
+
+
+# --- a linked work folder is never built into or moved through ---
+
+
+@posix_only
+def test_a_linked_work_folder_stops_the_move_to_holding_and_changes_nothing(library, tmp_path):
+    """Someone with write access to the drive could replace `ShelfSaver` with a link. Creating
+    folders through it would put them (owned by the library's owner) wherever the link points,
+    just as clearing the holding folder refuses to follow a link (see `_holding_roots`)."""
+    plan = prepare(library, ".mkv", True)
+    work = work_root(library)
+    elsewhere = tmp_path / "Elsewhere"
+    os.rename(work, elsewhere)               # the real work folders (with the new file) move away...
+    os.symlink(elsewhere, work)              # ...and a link takes their place
+    with pytest.raises(OSError, match="link"):
+        execute_swap(plan)
+    assert read_file(plan.original) == OLD   # the original was never touched
+    assert not (elsewhere / "holding").exists()
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["incoming"]
+
+
+@posix_only
+def test_a_linked_holding_folder_stops_the_move_to_holding(library, tmp_path):
+    plan = prepare(library, ".mkv", True)
+    target = tmp_path / "Elsewhere"
+    target.mkdir()
+    os.symlink(target, work_root(library) / "holding")
+    with pytest.raises(OSError, match="link"):
+        execute_swap(plan)
+    assert read_file(plan.original) == OLD
+    assert list(target.iterdir()) == []
+
+
+@posix_only
+def test_ordinary_work_folders_are_still_used(library):
+    plan = prepare(library, ".mkv", True)
+    execute_swap(plan)
+    assert_finished(plan)

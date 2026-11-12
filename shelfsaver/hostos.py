@@ -231,6 +231,12 @@ def make_dirs_like(path: str, model: str) -> list:
       people make a library's top folder read-only (0555) so it cannot be deleted by mistake.
       Copying that exactly would make ShelfSaver's own `ShelfSaver` folder read-only to ShelfSaver,
       and it could not create `incoming` inside it. The others' bits are still copied as they are.
+    - The sticky bit is copied too (it only restricts who may delete what, so it can never make
+      a folder more open). Dropping it would turn a sticky share folder (1777) into a plain 0777
+      one, where anyone could delete someone else's held original. setuid and setgid are not.
+    - One owner per drive is assumed. `ShelfSaver`, `incoming` and `holding` are shared by every
+      library on the drive, and are made like whichever library needed them first. With
+      libraries of different owners on one drive, later ones use those folders as they are.
     - The owner and mode are then applied through an open handle to the folder, opened without
       following links. A path could be swapped for a link to somewhere else between our mkdir and
       a chown/chmod; a handle cannot.
@@ -271,9 +277,11 @@ def make_dirs_like(path: str, model: str) -> list:
 
 
 def _folder_bits(wanted) -> int:
-    """The nine permission bits for a folder we create: the model's, plus full access for the
-    owner (the account ShelfSaver runs as, once ownership has been matched or kept)."""
-    return (stat.S_IMODE(wanted.st_mode) & 0o777) | 0o700
+    """The permission bits for a folder we create: the model's nine, its sticky bit, plus full
+    access for the owner (the account ShelfSaver runs as, once ownership has been matched or
+    kept). setuid and setgid are left out on purpose."""
+    mode = stat.S_IMODE(wanted.st_mode)
+    return (mode & 0o777) | (mode & stat.S_ISVTX) | 0o700
 
 
 def _match_new_folder(wanted, folder: str) -> list:
@@ -294,7 +302,7 @@ def _match_new_folder(wanted, folder: str) -> list:
         wanted_bits = _folder_bits(wanted)
         try:
             # Read the mode again: a successful chown can clear bits on its own.
-            if stat.S_IMODE(os.fstat(fd).st_mode) & 0o777 != wanted_bits:
+            if stat.S_IMODE(os.fstat(fd).st_mode) & 0o1777 != wanted_bits:
                 os.fchmod(fd, wanted_bits)
         except OSError as exc:
             problems.append(f"permissions {wanted_bits:o} were refused ({exc.strerror or exc})")
