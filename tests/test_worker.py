@@ -2073,3 +2073,17 @@ def test_the_work_folders_take_the_library_folders_permissions(env):
     work = env.volume / "ShelfSaver"
     assert os.stat(work).st_mode & 0o777 == 0o750
     assert os.stat(work / "incoming").st_mode & 0o777 == 0o750
+
+
+@pytest.mark.skipif(hostos.IS_WINDOWS, reason="Linux-only behaviour")
+def test_a_linked_work_folder_fails_the_run_without_building_through_the_link(env, tmp_path):
+    """The `ShelfSaver` folder on the library's drive is replaced by a link: the converted file must
+    not be copied into the link's target, and no folder may be created there."""
+    elsewhere = tmp_path / "Elsewhere"
+    elsewhere.mkdir()
+    os.symlink(elsewhere, env.volume / "ShelfSaver")
+    f = env.queue_video()
+    env.worker.process_one()
+    assert env.status(f.id) != "converted"
+    assert list(elsewhere.iterdir()) == []
+    assert env.lib_file.read_bytes() == env.original_bytes   # the original is untouched

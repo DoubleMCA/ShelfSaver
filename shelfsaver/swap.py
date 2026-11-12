@@ -15,6 +15,7 @@ exactly where it is.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -301,6 +302,8 @@ def _rename(source: str, target: str) -> None:
 def _move_to_holding(plan: SwapPlan) -> None:
     # The held file's folders are made like the folder the original lives in, so the library's
     # owner can still open, tidy and delete them (see hostos.make_dirs_like).
+    refuse_linked_work_folders(work_root(os.path.dirname(plan.original)),
+                               os.path.dirname(plan.holding))
     problems = hostos.make_dirs_like(ext_path(os.path.dirname(plan.holding)),
                                      ext_path(os.path.dirname(plan.original)))
     if problems:
@@ -457,6 +460,29 @@ def _may_be_a_link(path: Path) -> bool:
     except OSError:
         return True
     return hostos.is_link_like(info)
+
+
+def refuse_linked_work_folders(work, target) -> None:
+    """Raise OSError if the work folder, or any folder between it and `target` that already
+    exists, is a link (or cannot be read).
+
+    Why: `ShelfSaver` sits on the library's drive, so anyone who can write to the drive's top
+    folder could replace it with a link. Building folders and copying a converted file through it
+    would put them (owned by the library's owner) wherever the link points. Clearing the holding
+    folder already refuses links for the same reason (see `_holding_roots`); this is the same rule
+    for creating. Nothing has been created or moved yet when this raises.
+    """
+    folders = [Path(work)]
+    try:
+        parts = Path(target).relative_to(work).parts
+    except ValueError:  # `target` is not under `work`: only the work folder itself is checked
+        parts = ()
+    for part in parts:
+        folders.append(folders[-1] / part)
+    for folder in folders:
+        if _may_be_a_link(folder):
+            raise OSError(errno.ELOOP, f"{folder} is a link, or can't be read, so ShelfSaver "
+                                       "won't create folders or files through it")
 
 
 def _holding_roots(library_paths: Iterable) -> list[Path]:
