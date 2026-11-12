@@ -1,0 +1,29 @@
+# Keeps the GitHub Actions used by the Docker image workflow up to date.
+#
+# Why this exists: every action in .github/workflows/docker-image.yml is pinned to a full commit
+# SHA, so a moved or hijacked tag cannot change what the publishing job runs. The price of a pin
+# is that nothing updates it, so it quietly goes stale and misses security fixes. Dependabot reads
+# the version comment after each SHA (for example "# v7.0.1"), and when a newer release exists it
+# opens a pull request that changes both the SHA and the comment. A person still reviews and
+# merges it, so nothing reaches the publishing workflow unreviewed.
+#
+# Not covered on purpose:
+#   - Python packages: pyproject.toml uses ranges, and the image is rebuilt weekly, so each build
+#     already takes the newest releases the ranges allow. There is no lockfile for Dependabot to
+#     update.
+#   - The Docker base image: debian:trixie-slim is a floating tag, and the weekly rebuild plus
+#     `apt-get upgrade` already pull in Debian's security fixes.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Several actions in this workflow (the docker/* ones) are released together, so group them
+    # into one pull request instead of several near-identical ones.
+    groups:
+      docker-actions:
+        patterns:
+          - "docker/*"
+    # Keeps the review queue small if a few weeks go by unmerged.
+    open-pull-requests-limit: 3
