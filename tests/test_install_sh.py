@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,8 @@ def test_uninstall_with_remove_data_is_accepted(tmp_path):
     assert r.stdout.strip() == "1 1"
 
 
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="as root the folder is root's, which is refused (tested below)")
 def test_user_comes_from_the_folder_owner(tmp_path):
     r = run_fn(tmp_path, f'choose_user "{tmp_path}"')
     assert r.returncode == 0, r.stderr
