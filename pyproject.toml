@@ -8,7 +8,10 @@ version = "0.6.3"
 description = "Watches video library folders and converts worthwhile files to H.265 on the GPU."
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = ["fastapi>=0.162,<1", "uvicorn>=0.54,<1", "watchdog>=6.0,<7", "mcp>=2.3,<3"]
+# watchdog 7 needs Python 3.11 or newer but this project still supports 3.10. pip skips a
+# release whose Requires-Python does not match, so Python 3.10 installs resolve to watchdog 6.x and
+# everything newer gets 7.x. tests/test_scanner_live_watch.py checks both with a real observer.
+dependencies = ["fastapi>=0.162,<1", "uvicorn>=0.54,<1", "watchdog>=6.0,<8", "mcp>=2.3,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx", "httpx2"]
