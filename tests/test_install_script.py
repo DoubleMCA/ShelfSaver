@@ -65,9 +65,18 @@ def test_ffmpeg_that_reports_failure_is_not_trusted(tmp_path):
     assert choose(tmp_path, broken) == ""
 
 
+@pytest.mark.parametrize("listing", ["V....D hevc_amf  AMD AMF HEVC encoder",
+                                     "V..... hevc_qsv  HEVC (Intel Quick Sync Video)"])
+def test_installer_accepts_any_known_gpu_encoder(tmp_path, listing):
+    """An AMD-only or Intel-only PC must not be turned away for lacking NVIDIA's encoder."""
+    good = fake_ffmpeg(tmp_path, "full", listing)
+    assert choose(tmp_path, good) == str(good)
+
+
 def test_setup_stops_with_a_plain_message_when_no_ffmpeg_can_encode():
     text = SCRIPT.read_text(encoding="utf-8")
-    assert "can't convert video on the NVIDIA graphics card" in text
+    assert "can't convert video on a graphics card" in text
+    assert "NVIDIA graphics card" not in text
 
 
 def test_setup_opens_the_port_on_every_network_type():

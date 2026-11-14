@@ -15,7 +15,9 @@
 #   --scratch DIR   Folder a scratch disk may be in (optional, repeatable).
 #   --user NAME     Account ShelfSaver runs as. Default: the owner of the first media folder,
 #                   so converted files keep the right owner. Never root.
-#   --encoder X     nvenc (NVIDIA) or qsv (Intel Quick Sync). Default: whichever works.
+#   --encoder X     nvenc (NVIDIA) or qsv (Intel Quick Sync), written into the settings so
+#                   ShelfSaver always uses it. Default: ShelfSaver picks whichever works, each
+#                   time it starts (so a new graphics card needs no reinstall).
 #   --uninstall     Stops ShelfSaver and removes its service, firewall rule and program folder.
 #                   The data folder is kept unless --remove-data is also given.
 #   --remove-data   With --uninstall only: also delete the data folder (settings, history, login).
@@ -44,7 +46,8 @@ parse_args() {
     MEDIA=()
     SCRATCH=()
     RUN_USER=""
-    ENCODER=""
+    ENCODER=""      # the encoder found to work (for messages)
+    PIN_ENCODER=""  # what --encoder asked for: the only value written into config.json
     UNINSTALL=0
     REMOVE_DATA=0
     while [[ $# -gt 0 ]]; do
@@ -52,7 +55,8 @@ parse_args() {
             --media) [[ $# -ge 2 ]] || fail "--media needs a folder."; MEDIA+=("$2"); shift 2 ;;
             --scratch) [[ $# -ge 2 ]] || fail "--scratch needs a folder."; SCRATCH+=("$2"); shift 2 ;;
             --user) [[ $# -ge 2 ]] || fail "--user needs an account name."; RUN_USER="$2"; shift 2 ;;
-            --encoder) [[ $# -ge 2 ]] || fail "--encoder needs nvenc or qsv."; ENCODER="$2"; shift 2 ;;
+            --encoder) [[ $# -ge 2 ]] || fail "--encoder needs nvenc or qsv."
+                       ENCODER="$2"; PIN_ENCODER="$2"; shift 2 ;;
             --uninstall) UNINSTALL=1; shift ;;
             --remove-data) REMOVE_DATA=1; shift ;;
             -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -111,8 +115,9 @@ inside_app_dir() {
 
 # --- Settings and service file ------------------------------------------------------------------
 
-# Write config.json: keep every key already there, set encoder/ffmpeg/ffprobe, and set the media
-# and scratch roots only when given (an update without --media keeps the folders already set).
+# Write config.json: keep every key already there, set ffmpeg/ffprobe, set the encoder only when
+# --encoder was given (otherwise ShelfSaver chooses, and an encoder pinned before stays), and set
+# the media and scratch roots only when given (an update without --media keeps them).
 # Values reach Python as arguments, never as code. An unreadable file is kept as config.json.bad.
 write_config() {
     python3 - "$1" "$2" "$3" "$4" "${#MEDIA[@]}" ${MEDIA[@]+"${MEDIA[@]}"} \
@@ -133,7 +138,9 @@ if os.path.exists(path):
         print("NOTE: The old config.json could not be read. It was kept as config.json.bad "
               "and a new one will be written.")
         config = {}
-config.update(encoder=encoder, ffmpeg=ffmpeg, ffprobe=ffprobe)
+config.update(ffmpeg=ffmpeg, ffprobe=ffprobe)
+if encoder:
+    config["encoder"] = encoder
 if media:
     config["media_roots"] = media
 if scratch:
@@ -341,10 +348,11 @@ build_new() {
 }
 
 # ShelfSaver's own start-up check, run as the service user, so it also proves the account can open
-# the GPU. NVIDIA first, then Intel; --encoder checks only that one.
+# the GPU. NVIDIA first, then Intel; --encoder checks only that one. This only proves that
+# something can convert: ShelfSaver makes the actual choice itself each time it starts.
 detect_encoder() {
     local candidates=(nvenc qsv) name
-    [[ -n "$ENCODER" ]] && candidates=("$ENCODER")
+    [[ -n "$PIN_ENCODER" ]] && candidates=("$PIN_ENCODER")
     for name in "${candidates[@]}"; do
         if as_service_user "$NEW_DIR/venv/bin/python" -c '
 import sys
@@ -385,7 +393,7 @@ swap_in() {
         fail "The new version could not start from $APP_DIR."
 
     CONFIG_WRITTEN=1
-    write_config "$CONFIG_PATH" "$ENCODER" "$FFMPEG" "$FFPROBE"
+    write_config "$CONFIG_PATH" "$PIN_ENCODER" "$FFMPEG" "$FFPROBE"
     chown -- "$RUN_UID:$RUN_GID" "$CONFIG_PATH"
     chmod 600 -- "$CONFIG_PATH"
     say "Saved settings to $CONFIG_PATH"
