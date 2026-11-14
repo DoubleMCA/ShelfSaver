@@ -202,14 +202,18 @@ def test_original_put_back_from_holding_is_not_converted_again(env):
 
 # ---- End to end on the real graphics card ----
 
-def real_encoder(monkeypatch):
+def real_encoder(monkeypatch, env, encoder):
+    """Convert for real, on this machine's own encoder (conftest.hardware_encoder)."""
     from shelfsaver.encode import run_ffmpeg
+    from shelfsaver.encoder_choice import EncoderChoice
     monkeypatch.setattr(worker_module, "run_ffmpeg", run_ffmpeg)
+    env.worker.encoders = EncoderChoice(
+        Config(data_dir=env.tmp_path / "data", encoder=encoder.name), lambda enc: True)
 
 
 @pytest.mark.gpu
-def test_end_to_end_converts_and_holds_original(env, monkeypatch):
-    real_encoder(monkeypatch)
+def test_end_to_end_converts_and_holds_original(env, monkeypatch, hardware_encoder):
+    real_encoder(monkeypatch, env, hardware_encoder)
     f = env.queue(make_video(env.lib / "movie [2019] 'ü'.mkv"))
     env.worker.process_one()
     row = env.db.get_file(f.id)
@@ -220,8 +224,8 @@ def test_end_to_end_converts_and_holds_original(env, monkeypatch):
 
 
 @pytest.mark.gpu
-def test_end_to_end_strip_only_removes_spanish(env, monkeypatch):
-    real_encoder(monkeypatch)
+def test_end_to_end_strip_only_removes_spanish(env, monkeypatch, hardware_encoder):
+    real_encoder(monkeypatch, env, hardware_encoder)
     env.db.update_library(env.library.id, english_only=True)
     f = env.queue(make_video(env.lib / "two.mkv", seconds=2, size="320x240", vcodec="libx265",
                              crf=40, audio=(("eng", "English"), ("spa", "Spanish"))))
@@ -249,8 +253,8 @@ def test_the_worker_keeps_the_default_language_from_settings(env):
 
 
 @pytest.mark.gpu
-def test_end_to_end_avi_becomes_mkv(env, monkeypatch):
-    real_encoder(monkeypatch)
+def test_end_to_end_avi_becomes_mkv(env, monkeypatch, hardware_encoder):
+    real_encoder(monkeypatch, env, hardware_encoder)
     f = env.queue(make_video(env.lib / "old.avi", seconds=2))
     env.worker.process_one()
     row = env.db.get_file(f.id)
@@ -2181,8 +2185,8 @@ def test_failures_under_auto_with_nothing_left_pause_as_before(env):
 
 
 @pytest.mark.gpu
-def test_end_to_end_strip_only_removes_a_commentary_track(env, monkeypatch):
-    real_encoder(monkeypatch)
+def test_end_to_end_strip_only_removes_a_commentary_track(env, monkeypatch, hardware_encoder):
+    real_encoder(monkeypatch, env, hardware_encoder)
     env.db.update_library(env.library.id, remove_commentary=True)
     f = env.queue(make_video(env.lib / "two.mkv", seconds=2, size="320x240", vcodec="libx265",
                              crf=40, audio=(("eng", "English"), ("eng", "Director's Commentary"))))

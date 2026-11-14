@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,6 +57,42 @@ def test_refuses_out_inside_source_folder(tmp_path, capsys):
 def test_refuses_missing_source(tmp_path):
     assert clips.main(["--source", str(tmp_path / "nope.mkv"), "--start", "0",
                        "--out", str(tmp_path / "o")]) == 2
+
+
+def test_compare_clips_auto_uses_the_detected_encoder(tmp_path, monkeypatch):
+    from shelfsaver.encoders import Qsv
+    chosen = Qsv()
+
+    class Detected:
+        def __init__(self, config, works):
+            assert config.encoder == "auto"
+
+        def after_failures(self):
+            return chosen
+
+    used = []
+    monkeypatch.setattr(clips, "EncoderChoice", Detected)
+    monkeypatch.setattr(clips, "build_command",
+                        lambda *a: used.append(a[-1]) or ["ffmpeg", "-version"])
+    monkeypatch.setattr(clips, "run_ffmpeg", lambda *a: SimpleNamespace(returncode=1, log_tail=""))
+    src = make_video(tmp_path / "source" / "Movie.mkv", seconds=2, size="320x180")
+    clips.main(["--source", str(src), "--start", "0", "--seconds", "1", "--out",
+                str(tmp_path / "clips"), "--encoder", "auto"])
+    assert used and all(enc is chosen for enc in used)
+
+
+def test_compare_clips_says_so_when_no_encoder_works(tmp_path, monkeypatch, capsys):
+    class Nothing:
+        def __init__(self, config, works):
+            pass
+
+        def after_failures(self):
+            return None
+
+    monkeypatch.setattr(clips, "EncoderChoice", Nothing)
+    src = make_video(tmp_path / "source" / "Movie.mkv", seconds=2, size="320x180")
+    assert clips.main(["--source", str(src), "--start", "0", "--out", str(tmp_path / "c")]) == 2
+    assert "No working hardware encoder" in capsys.readouterr().err
 
 
 def test_clip_names_come_from_level_names():

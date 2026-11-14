@@ -14,8 +14,9 @@ import sys
 from pathlib import Path
 
 from shelfsaver.config import load_config
-from shelfsaver.encode import build_command, run_ffmpeg
-from shelfsaver.encoders import ENCODERS
+from shelfsaver.encode import build_command, encoder_works, run_ffmpeg
+from shelfsaver.encoder_choice import EncoderChoice
+from shelfsaver.encoders import AUTO, ENCODERS
 from shelfsaver.decide import decide
 from shelfsaver.models import Decision
 from shelfsaver.probe import ProbeError, probe
@@ -78,8 +79,9 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--ffmpeg", default=config.ffmpeg)
     ap.add_argument("--ffprobe", default=config.ffprobe)
-    ap.add_argument("--encoder", default=config.encoder, choices=sorted(ENCODERS),
-                    help="which hardware encoder to compare with")
+    ap.add_argument("--encoder", default=config.encoder, choices=sorted(ENCODERS) + [AUTO],
+                    help="which hardware encoder to compare with (auto: whichever works, as "
+                         "ShelfSaver itself chooses)")
     args = ap.parse_args(argv)
 
     source = args.source.resolve()
@@ -93,6 +95,12 @@ def main(argv=None) -> int:
     if _is_inside(out, source.parent):
         print("The clips folder must not be inside the folder the source video is in. "
               "Pick a different folder.", file=sys.stderr)
+        return 2
+
+    config.encoder = args.encoder
+    encoder = EncoderChoice(config, lambda enc: encoder_works(args.ffmpeg, enc)).after_failures()
+    if encoder is None:
+        print("No working hardware encoder (NVIDIA, AMD or Intel) was found.", file=sys.stderr)
         return 2
 
     name = source.stem
@@ -116,8 +124,7 @@ def main(argv=None) -> int:
     failed = False
     for level in LEVELS:
         dest = out / clip_name(name, level)
-        cmd = build_command(info, decision, level, original, dest, args.ffmpeg,
-                            ENCODERS[args.encoder]())
+        cmd = build_command(info, decision, level, original, dest, args.ffmpeg, encoder)
         result = run_ffmpeg(cmd, info.duration, lambda f: None, lambda: False)
         if result.returncode != 0 or not dest.is_file():
             dest.unlink(missing_ok=True)

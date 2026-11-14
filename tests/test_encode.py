@@ -13,8 +13,8 @@ from tests.helpers import convert, eng_spa, info, make_video, strip
 
 
 @pytest.mark.gpu
-def test_encoder_check_passes_on_a_working_graphics_card():
-    assert encoder_works("ffmpeg") is True
+def test_encoder_check_passes_on_a_working_graphics_card(hardware_encoder):
+    assert encoder_works("ffmpeg", hardware_encoder) is True
 
 
 def test_encoder_check_fails_when_ffmpeg_reports_an_error():
@@ -124,16 +124,16 @@ def test_mov_text_to_mkv_becomes_srt():
     assert cmd[cmd.index("-c:s:0") + 1] == "srt"
 
 
-def _run(src, out, decision=None):
+def _run(src, out, encoder, decision=None):
     media = probe(src, "ffprobe")
-    cmd = build_command(media, decision or convert(), "medium", src, out, "ffmpeg")
+    cmd = build_command(media, decision or convert(), "medium", src, out, "ffmpeg", encoder)
     result = run_ffmpeg(cmd, media.duration, lambda f: None, lambda: False)
     assert result.returncode == 0, result.log_tail
     return probe(out, "ffprobe")
 
 
 @pytest.mark.gpu
-def test_real_encode_keeps_tracks_chapters_and_cover_art(tmp_path):
+def test_real_encode_keeps_tracks_chapters_and_cover_art(tmp_path, hardware_encoder):
     base = make_video(tmp_path / "base.mkv", seconds=2, size="640x360",
                       audio=[("eng", "A"), ("spa", "B")], subs=[("eng", None)], cover_art=True)
     meta = tmp_path / "meta.txt"
@@ -143,7 +143,7 @@ def test_real_encode_keeps_tracks_chapters_and_cover_art(tmp_path):
     subprocess.run(["ffmpeg", "-v", "error", "-i", str(base), "-i", str(meta), "-map", "0",
                     "-map_metadata", "1", "-c", "copy", str(src)], check=True)
     out = tmp_path / "o.mkv"
-    result = _run(src, out)
+    result = _run(src, out, hardware_encoder)
     kinds = [s.kind for s in result.streams]
     assert result.video_codec == "hevc"
     assert kinds.count("audio") == 2 and kinds.count("subtitle") == 1
@@ -155,27 +155,27 @@ def test_real_encode_keeps_tracks_chapters_and_cover_art(tmp_path):
 
 
 @pytest.mark.gpu
-def test_real_encode_with_mp4_cover_art_targets_main_video(tmp_path):
+def test_real_encode_with_mp4_cover_art_targets_main_video(tmp_path, hardware_encoder):
     src = make_video(tmp_path / "s.mp4", seconds=2, size="640x360", cover_art=True)
-    result = _run(src, tmp_path / "o.mp4")
+    result = _run(src, tmp_path / "o.mp4", hardware_encoder)
     assert result.video_codec == "hevc"
     assert any(s.is_cover_art for s in result.streams)
 
 
 @pytest.mark.gpu
-def test_real_encode_deinterlaces_main_video_only(tmp_path):
+def test_real_encode_deinterlaces_main_video_only(tmp_path, hardware_encoder):
     src = make_video(tmp_path / "s.mp4", seconds=2, size="640x360", interlaced=True, cover_art=True)
-    result = _run(src, tmp_path / "o.mp4")
+    result = _run(src, tmp_path / "o.mp4", hardware_encoder)
     assert result.video_codec == "hevc"
     assert result.field_order in ("progressive", None, "unknown")
     assert any(s.is_cover_art for s in result.streams)
 
 
 @pytest.mark.gpu
-def test_real_encode_keeps_hdr(tmp_path):
+def test_real_encode_keeps_hdr(tmp_path, hardware_encoder):
     src = make_video(tmp_path / "s.mkv", seconds=2, size="640x360", vcodec="libx265", hdr=True)
     out = tmp_path / "o.mkv"
-    result = _run(src, out)
+    result = _run(src, out, hardware_encoder)
     assert result.bit_depth == 10 and result.color_transfer == "smpte2084"
     assert result.color_primaries == "bt2020"
     frames = subprocess.run(
@@ -187,9 +187,9 @@ def test_real_encode_keeps_hdr(tmp_path):
 
 
 @pytest.mark.gpu
-def test_mp4_text_subs_survive_move_to_mkv(tmp_path):
+def test_mp4_text_subs_survive_move_to_mkv(tmp_path, hardware_encoder):
     src = make_video(tmp_path / "s.mp4", seconds=2, size="640x360", subs=[("eng", "English")])
-    result = _run(src, tmp_path / "o.mkv")
+    result = _run(src, tmp_path / "o.mkv", hardware_encoder)
     subs = [s for s in result.streams if s.kind == "subtitle"]
     assert len(subs) == 1 and subs[0].codec == "subrip" and subs[0].language == "eng"
 
