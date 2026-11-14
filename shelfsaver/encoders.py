@@ -266,14 +266,20 @@ class Amf(Encoder):
         return {"available": None, "name": None, "driver": None}  # not probed on Windows
 
 
-# Every encoder ShelfSaver knows, by `name`. The first is the default and what runs today.
+# Every encoder ShelfSaver knows, by `name`. DEFAULT_NAME is the fallback for helpers and tests
+# that need one concrete encoder; the app itself defaults to AUTO (see encoder_choice.py).
 ENCODERS = {"nvenc": Nvenc, "qsv": Qsv, "amf": Amf}
 DEFAULT_NAME = "nvenc"
+# The encoder setting that means "use whichever works": see encoder_choice.EncoderChoice.
+AUTO = "auto"
 
 
 def encoder_for(config) -> Encoder:
     """The encoder the settings ask for. An unknown name falls back to the default rather than
-    stopping the app: config.load_config already drops names it does not recognise."""
+    stopping the app: config.load_config already drops names it does not recognise.
+
+    AUTO also returns the fallback here. Code that should follow the automatic choice (the
+    worker, the status tiles) uses encoder_choice.EncoderChoice instead."""
     cls = ENCODERS.get(getattr(config, "encoder", DEFAULT_NAME), ENCODERS[DEFAULT_NAME])
     return cls.from_config(config)
 

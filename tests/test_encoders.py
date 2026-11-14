@@ -133,7 +133,7 @@ def test_every_registered_encoder_names_itself_consistently():
 def test_the_encoder_setting_comes_from_the_environment_then_the_file(tmp_path, monkeypatch):
     monkeypatch.setenv("SHELFSAVER_DATA", str(tmp_path))
     monkeypatch.delenv("SHELFSAVER_ENCODER", raising=False)
-    assert load_config().encoder == "nvenc"
+    assert load_config().encoder == "auto"  # nothing set: the app chooses (encoder_choice.py)
     (tmp_path / "config.json").write_text(json.dumps({"encoder": "nvenc"}))
     assert load_config().encoder == "nvenc"
     monkeypatch.setenv("SHELFSAVER_ENCODER", "  NVENC ")  # case and spaces do not matter
@@ -141,4 +141,4 @@ def test_the_encoder_setting_comes_from_the_environment_then_the_file(tmp_path, 
     monkeypatch.setenv("SHELFSAVER_ENCODER", "banana")      # unknown: ignored, not fatal
     assert load_config().encoder == "nvenc"
     (tmp_path / "config.json").write_text(json.dumps({"encoder": 5}))
-    assert load_config().encoder == "nvenc"
+    assert load_config().encoder == "auto"
