@@ -807,6 +807,9 @@
     } else if (worker.state === 'no_scratch') {
       title = 'Waiting for a scratch disk';
       line = 'Conversions start once a scratch disk is available.';
+    } else if (worker.state === 'no_encoder') {
+      title = 'No graphics card encoder found';
+      line = worker.message || 'Conversions start once a graphics card encoder works.';
     } else {
       title = 'Nothing is being converted right now';
       if (status.stats && status.stats.remaining) {

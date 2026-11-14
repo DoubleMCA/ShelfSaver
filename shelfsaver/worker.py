@@ -26,7 +26,8 @@ from typing import Callable, Optional
 from . import hostos
 from .decide import SAMPLE_FAILED, SAMPLE_SHORT, STRIP_WHY, TRIED_REASONS, decide
 from .encode import EncodeResult, build_command, encoder_works, output_extension, run_ffmpeg
-from .encoders import encoder_for
+from .encoder_choice import EncoderChoice
+from .encoders import Encoder
 from .languages import load_language
 from .models import IGNORED_REASON, RUN_STATES, Decision, FileRow, Library, MediaInfo, Run
 from .probe import UNREADABLE, ProbeError, file_details, probe
@@ -71,6 +72,7 @@ NO_SCRATCH_FOUND = "The scratch disk can't be found"
 NO_ROOM_SCRATCH = "Not enough room on the scratch disk"
 NO_ROOM_LIBRARY = "Not enough room on the library drive"
 BREAKER_MESSAGE = "Paused: conversions keep failing. Check the graphics card and logs."
+NO_ENCODER = "No graphics card encoder was found. ShelfSaver checks again every minute."
 
 WAITING_IN_USE = "Waiting, file is in use"
 WHOLE_DRIVE = "This library is a whole drive. Choose a folder on the drive instead."
@@ -261,7 +263,11 @@ class Worker:
     def __init__(self, db, config):
         self.db = db
         self.config = config
-        self.encoder = encoder_for(config)  # chosen once: a conversion must not switch mid-run
+        # Which encoder to use; the usage tile and health tool read the same object. `encoder` is
+        # set from it before each file and only then: a conversion must not switch mid-run.
+        # (`encoder_works` is looked up when called, so tests can replace it.)
+        self.encoders = EncoderChoice(config, lambda enc: encoder_works(config.ffmpeg, enc))
+        self.encoder: Optional[Encoder] = self.encoders.current()
         self._lock = threading.Lock()  # guards everything status() and retry() touch
         self._status = self._idle_fields()
         self._step_started = 0.0
@@ -466,6 +472,11 @@ class Worker:
         if file is None:
             self._set_idle()
             return worked
+        encoder = self.encoders.before_conversion()
+        if encoder is None:
+            self._set_status("no_encoder", message=NO_ENCODER)  # the file stays queued
+            return worked
+        self.encoder = encoder
         try:
             finished = self._process_file(file, scratch)
         except Exception:
@@ -807,7 +818,8 @@ class Worker:
             self._failed_encodes.append(job.file.id)
             failed = list(self._failed_encodes)
         if len(failed) >= ENCODER_FAILURE_LIMIT:
-            if encoder_works(self.config.ffmpeg, self.encoder):
+            # Pinned: the same card check as always. Auto: look again and move to whatever works.
+            if self.encoders.after_failures() is not None:
                 logger.warning("The graphics card works, so these files are the problem: %s",
                                failed)
                 with self._lock:

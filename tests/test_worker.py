@@ -2102,6 +2102,84 @@ def test_the_worker_removes_a_commentary_track_when_the_library_asks(env):
     assert "English" in [t["title"] for t in tracks["kept"]]
 
 
+# ---- Automatic encoder choice (the worker's side; the rules are in test_encoder_choice.py) ----
+
+class FakeChoice:
+    """Stands in for EncoderChoice: answers what the test says and counts the calls."""
+
+    def __init__(self, before=None, after=None):
+        self.before = before
+        self.after = after
+        self.before_calls = 0
+        self.after_calls = 0
+
+    def before_conversion(self):
+        self.before_calls += 1
+        return self.before
+
+    def after_failures(self):
+        self.after_calls += 1
+        return self.after
+
+    def current(self):
+        return self.before
+
+
+def test_no_encoder_leaves_files_queued_and_says_so(env, monkeypatch):
+    env.queue_video()
+    env.worker.encoders = FakeChoice(before=None)
+    swaps = []
+    real = env.worker._advance_due_swaps
+    monkeypatch.setattr(env.worker, "_advance_due_swaps", lambda: swaps.append(1) or real())
+    assert env.worker.process_one() is False
+    assert env.status() == "queued" and env.encodes == 0
+    status = env.worker.status()
+    assert status["state"] == "no_encoder" and status["message"] == worker_module.NO_ENCODER
+    assert swaps == [1]  # swaps due still go ahead without an encoder
+
+
+def test_the_encoder_is_chosen_before_each_file_not_during_one(env):
+    from shelfsaver.encoders import Nvenc
+    chosen = Nvenc()
+    env.worker.encoders = FakeChoice(before=chosen)
+    seen = []
+
+    def encode(cmd, duration, on_progress, should_stop):
+        seen.append(env.worker.encoder)
+        return env._fake_encode(cmd, duration, on_progress, should_stop)
+
+    env.use_encode(encode)
+    env.queue_video(name="a.mkv")
+    env.queue_video(name="b.mkv")
+    env.worker.process_one()
+    env.worker.process_one()
+    assert env.worker.encoders.before_calls == 2
+    assert seen and all(e is chosen for e in seen)
+
+
+def test_failures_under_auto_switch_instead_of_pausing(env):
+    from shelfsaver.encoders import Nvenc, Qsv
+    for name in ("a.mkv", "b.mkv", "c.mkv", "d.mkv"):
+        env.queue_video(name=name)
+    env.fail_encodes()
+    env.worker.encoders = FakeChoice(before=Nvenc(), after=Qsv())
+    [env.worker.process_one() for _ in range(3)]
+    assert env.worker.encoders.after_calls == 1
+    assert env.worker.status()["state"] == "idle"          # moved on, not paused
+    assert env.worker._failed_encodes == []
+
+
+def test_failures_under_auto_with_nothing_left_pause_as_before(env):
+    from shelfsaver.encoders import Nvenc
+    for name in ("a.mkv", "b.mkv", "c.mkv"):
+        env.queue_video(name=name)
+    env.fail_encodes()
+    env.worker.encoders = FakeChoice(before=Nvenc(), after=None)
+    [env.worker.process_one() for _ in range(3)]
+    status = env.worker.status()
+    assert status["state"] == "paused" and status["message"] == BREAKER_MESSAGE
+
+
 @pytest.mark.gpu
 def test_end_to_end_strip_only_removes_a_commentary_track(env, monkeypatch):
     real_encoder(monkeypatch)

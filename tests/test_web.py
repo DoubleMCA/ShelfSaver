@@ -1136,6 +1136,12 @@ def test_pages_are_served(client, route, marker):
         assert client.get(asset).status_code == 200
 
 
+def test_the_status_page_explains_no_encoder():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "worker.state === 'no_encoder'" in app_js
+    assert "No graphics card encoder found" in app_js
+
+
 def test_no_inner_html_in_app_js():
     app_js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "innerHTML" not in app_js
