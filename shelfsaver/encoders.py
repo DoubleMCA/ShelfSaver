@@ -43,6 +43,12 @@ class Encoder:
         """Build the encoder from the app settings. Most need none; QSV reads its device."""
         return cls()
 
+    @classmethod
+    def supported(cls) -> bool:
+        """Whether this encoder can exist on this operating system at all. Automatic choice skips
+        an unsupported one without starting FFmpeg."""
+        return True
+
     def input_args(self) -> list:
         """Arguments that must come before the first `-i` (hardware device setup)."""
         return []
@@ -211,8 +217,57 @@ class Qsv(Encoder):
                 "driver": match.group(1).strip() if match else None}
 
 
+class Amf(Encoder):
+    """AMD AMF (Radeon cards), on Windows only. On Linux, AMD cards are driven through VAAPI.
+
+    How it differs from NVENC:
+    - Device: none to set up. AMF uses its default adapter, so a PC with Ryzen built-in graphics
+      *and* a Radeon card may encode on the built-in one; choosing the adapter is not offered yet.
+    - Frames: hevc_amf takes ordinary system-memory frames in nv12 or p010le, so the CPU
+      deinterlacer used for NVENC works unchanged.
+    - Quality: constant quality is `-rc cqp` with a QP for I and P frames (0 to 51, lower is
+      better), plus the slowest, best `-quality` preset.
+
+    Tuned on an RX 9000 series (RDNA 4) card. Older Radeon cards are allowed, but their encoders
+    are older and may look a little softer at the same level.
+    """
+
+    name = "amf"
+    label = "AMD AMF"
+    codec = "hevc_amf"
+
+    # PLACEHOLDERS until they are measured on an RX 9070, the same way the QSV numbers were (VMAF
+    # against NVENC's own levels on the same clips). Replace these and this comment then.
+    QUALITY = {"low": 22, "medium": 26, "high": 30}
+
+    @classmethod
+    def supported(cls) -> bool:
+        return hostos.IS_WINDOWS
+
+    def codec_args(self, stream: int, level: str, deep: bool) -> list:
+        pix, profile = ("p010le", "main10") if deep else ("nv12", "main")
+        qp = str(self.QUALITY[level])
+        return [f"-c:v:{stream}", self.codec, "-usage", "transcoding", "-quality", "quality",
+                "-rc", "cqp", "-qp_i", qp, "-qp_p", qp,
+                f"-pix_fmt:v:{stream}", pix, f"-profile:v:{stream}", profile]
+
+    def filters(self, deinterlace: bool) -> list:
+        return ["bwdif"] if deinterlace else []
+
+    def self_test_args(self) -> list:
+        # The blank test frame is RGB, so name the pixel format AMF takes.
+        return ["-frames:v", "1", "-c:v", self.codec, "-pix_fmt", "nv12"]
+
+    def usage_percent(self, run_tool: RunTool) -> Optional[int]:
+        # No cheap vendor tool reports AMD's encoder load; the tile shows a dash, as for Intel.
+        return None
+
+    def device_info(self, run_tool: RunTool) -> dict:
+        return {"available": None, "name": None, "driver": None}  # not probed on Windows
+
+
 # Every encoder ShelfSaver knows, by `name`. The first is the default and what runs today.
-ENCODERS = {"nvenc": Nvenc, "qsv": Qsv}
+ENCODERS = {"nvenc": Nvenc, "qsv": Qsv, "amf": Amf}
 DEFAULT_NAME = "nvenc"
 
 
