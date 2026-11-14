@@ -180,6 +180,35 @@ def test_health_reports_encoder(live, token, parts, monkeypatch):
     assert health["free_space"]["scratch"]["free_bytes"] is None
 
 
+class ChoiceStub:
+    def __init__(self, encoder, chosen):
+        self.encoder, self.chosen = encoder, chosen
+
+    def current(self):
+        return self.encoder
+
+    def describe(self):
+        if self.encoder is None:
+            return {"name": None, "label": None, "chosen": "none"}
+        return {"name": self.encoder.name, "label": self.encoder.label, "chosen": self.chosen}
+
+
+def test_health_reports_the_detected_encoder_and_how(parts, live, token, monkeypatch):
+    from shelfsaver.encoders import Amf
+    monkeypatch.setattr(mcp_server, "_run_tool", lambda args: None)
+    parts[1].encoders = ChoiceStub(Amf(), "detected")
+    health = call(live, token, "get_health")
+    assert health["encoder"] == "amf" and health["encoder_chosen"] == "detected"
+
+
+def test_health_with_no_encoder(parts, live, token, monkeypatch):
+    monkeypatch.setattr(mcp_server, "_run_tool", lambda args: None)
+    parts[1].encoders = ChoiceStub(None, "none")
+    health = call(live, token, "get_health")
+    assert health["encoder"] is None and health["encoder_chosen"] == "none"
+    assert health["gpu"] == {"available": False, "name": None, "driver": None}
+
+
 def test_health_survives_missing_tools(live, token, monkeypatch):
     monkeypatch.setattr(mcp_server, "_run_tool", lambda args: None)
     health = call(live, token, "get_health")
