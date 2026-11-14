@@ -173,7 +173,8 @@ def test_health_reports_encoder(live, token, parts, monkeypatch):
     # The original keys are unchanged; "encoders" and "encoder" were added for pluggable encoders.
     # This fake ffmpeg lists only NVENC, so every other known encoder reports as not built in.
     assert health["ffmpeg"] == {"available": True, "version": "7.1-test", "hevc_nvenc": True,
-                                "encoders": {"nvenc": True, "qsv": False, "amf": False}}
+                                "encoders": {"nvenc": True, "qsv": False, "amf": False,
+                                             "vaapi": False}}
     assert health["encoder"] == "nvenc"
     assert health["app_version"]
     assert health["free_space"]["libraries"][0]["free_bytes"] is None
@@ -243,9 +244,10 @@ def test_health_lists_each_known_encoder_the_ffmpeg_build_has(live, token, monke
         if "-encoders" in args:
             return (" V....D hevc_nvenc           NVIDIA NVENC hevc encoder\n"
                     " V..... hevc_qsv             HEVC (Intel Quick Sync Video acceleration)\n"
-                    " V....D hevc_amf             AMD AMF HEVC encoder (codec hevc)\n")
+                    " V....D hevc_amf             AMD AMF HEVC encoder (codec hevc)\n"
+                    " V....D hevc_vaapi           H.265/HEVC (VAAPI) (codec hevc)\n")
         return None
     monkeypatch.setattr(mcp_server, "_run_tool", fake_run)
     ffmpeg = call(live, token, "get_health")["ffmpeg"]
-    assert ffmpeg["encoders"] == {"nvenc": True, "qsv": True, "amf": True}
+    assert ffmpeg["encoders"] == {"nvenc": True, "qsv": True, "amf": True, "vaapi": True}
     assert ffmpeg["hevc_nvenc"] is True

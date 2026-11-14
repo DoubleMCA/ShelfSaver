@@ -46,7 +46,7 @@ class FakeEncoder(Encoder):
     def codec_args(self, stream, level, deep):
         return [f"-c:v:{stream}", self.codec, "-q", level, "-deep", str(deep)]
 
-    def filters(self, deinterlace):
+    def filters(self, deinterlace, deep=False):
         return ["hwupload", "deint"] if deinterlace else ["hwupload"]
 
     def self_test_args(self):
@@ -73,7 +73,7 @@ def test_the_encoder_supplies_codec_options_and_filters_and_nothing_nvenc_leaks_
 
 def test_no_filter_argument_when_the_encoder_wants_none():
     class Plain(FakeEncoder):
-        def filters(self, deinterlace):
+        def filters(self, deinterlace, deep=False):
             return []
 
     assert "-filter:v:0" not in build_command(**_kwargs(field_order="tt"), encoder=Plain())

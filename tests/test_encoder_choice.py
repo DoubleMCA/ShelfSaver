@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import pytest
 
-from shelfsaver import encoders, hostos
+from shelfsaver import hostos
 from shelfsaver.config import Config
 from shelfsaver.encoder_choice import BETTER_RETRY_SECONDS, RETRY_SECONDS, EncoderChoice
-from shelfsaver.encoders import Amf, Encoder, Nvenc, Qsv
+from shelfsaver.encoders import Amf, Nvenc, Qsv, Vaapi
 
 
 class Clock:
@@ -32,15 +32,6 @@ class Works:
         return self.ok.get(encoder.name, False)
 
 
-class LinuxOnly(Encoder):
-    """Stands in for the VAAPI encoder until it exists: Linux only, like the real one."""
-    name, label, codec = "vaapi", "Stand-in VAAPI", "hevc_vaapi"
-
-    @classmethod
-    def supported(cls):
-        return not hostos.IS_WINDOWS
-
-
 @pytest.fixture
 def windows(monkeypatch):
     monkeypatch.setattr(hostos, "IS_WINDOWS", True)
@@ -49,7 +40,6 @@ def windows(monkeypatch):
 @pytest.fixture
 def linux(monkeypatch):
     monkeypatch.setattr(hostos, "IS_WINDOWS", False)
-    monkeypatch.setitem(encoders.ENCODERS, "vaapi", LinuxOnly)
 
 
 def choice(works, encoder="auto", clock=None):
@@ -125,8 +115,13 @@ def test_linux_prefers_qsv_over_vaapi(linux):
     assert isinstance(choice(works).before_conversion(), Qsv)
 
 
-def test_vaapi_is_skipped_on_windows(windows, monkeypatch):
-    monkeypatch.setitem(encoders.ENCODERS, "vaapi", LinuxOnly)
+def test_an_amd_linux_machine_gets_vaapi(linux):
+    works = Works(vaapi=True)
+    assert isinstance(choice(works).before_conversion(), Vaapi)
+    assert works.calls == ["nvenc", "qsv", "vaapi"]
+
+
+def test_vaapi_is_skipped_on_windows(windows):
     works = Works()
     choice(works).before_conversion()
     assert "vaapi" not in works.calls

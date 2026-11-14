@@ -33,6 +33,8 @@ class Config:
     # QSV only. Linux: the render node (default /dev/dri/renderD128). Windows: the DirectX adapter
     # number when the PC has more than one GPU (default: Windows picks).
     qsv_device: str = ""
+    # VAAPI (AMD on Linux) only: the render node. Default /dev/dri/renderD128.
+    vaapi_device: str = ""
     # Folders the web UI may browse and libraries may live in. Empty means "no restriction"
     # on Windows (drive letters, as before) and "nothing allowed yet" on Linux; see
     # web/folders.py for why Linux must be told explicitly.
@@ -131,6 +133,8 @@ def load_config() -> Config:
         device = data.get("qsv_device")
         if isinstance(device, (str, int)) and not isinstance(device, bool):
             cfg.qsv_device = str(device).strip()
+        if isinstance(data.get("vaapi_device"), str):
+            cfg.vaapi_device = data["vaapi_device"].strip()
         if _valid_port(data.get("port")):
             cfg.port = _valid_port(data["port"])
         if _valid_host(data.get("host")):
@@ -149,6 +153,8 @@ def load_config() -> Config:
         cfg.encoder = _encoder_name(os.environ["SHELFSAVER_ENCODER"])
     if os.environ.get("SHELFSAVER_QSV_DEVICE", "").strip():
         cfg.qsv_device = os.environ["SHELFSAVER_QSV_DEVICE"].strip()
+    if os.environ.get("SHELFSAVER_VAAPI_DEVICE", "").strip():
+        cfg.vaapi_device = os.environ["SHELFSAVER_VAAPI_DEVICE"].strip()
     if _valid_port(os.environ.get("SHELFSAVER_PORT")):
         cfg.port = _valid_port(os.environ["SHELFSAVER_PORT"])
     if _valid_host(os.environ.get("SHELFSAVER_HOST")):

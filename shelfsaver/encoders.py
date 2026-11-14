@@ -61,8 +61,12 @@ class Encoder:
         """
         raise NotImplementedError
 
-    def filters(self, deinterlace: bool) -> list:
-        """Video filters, in order, to run before encoding (joined with commas by the caller)."""
+    def filters(self, deinterlace: bool, deep: bool = False) -> list:
+        """Video filters, in order, to run before encoding (joined with commas by the caller).
+
+        `deep` is true for 10-bit sources; only encoders that upload frames to the GPU themselves
+        (VAAPI) need it, to pick the upload format.
+        """
         raise NotImplementedError
 
     def self_test_args(self) -> list:
@@ -97,7 +101,7 @@ class Nvenc(Encoder):
             args += [f"-pix_fmt:v:{stream}", "yuv420p", f"-profile:v:{stream}", "main"]
         return args
 
-    def filters(self, deinterlace: bool) -> list:
+    def filters(self, deinterlace: bool, deep: bool = False) -> list:
         # NVENC takes ordinary system-memory frames, so the plain software deinterlacer works.
         return ["bwdif"] if deinterlace else []
 
@@ -190,7 +194,7 @@ class Qsv(Encoder):
                 "-global_quality", str(self.QUALITY[level]),
                 f"-pix_fmt:v:{stream}", pix, f"-profile:v:{stream}", profile]
 
-    def filters(self, deinterlace: bool) -> list:
+    def filters(self, deinterlace: bool, deep: bool = False) -> list:
         # Same CPU deinterlacer as NVENC. (vpp_qsv could do this on the GPU, but it needs an
         # upload step and gains little for an unattended batch tool; kept simple on purpose.)
         return ["bwdif"] if deinterlace else []
@@ -251,7 +255,7 @@ class Amf(Encoder):
                 "-rc", "cqp", "-qp_i", qp, "-qp_p", qp,
                 f"-pix_fmt:v:{stream}", pix, f"-profile:v:{stream}", profile]
 
-    def filters(self, deinterlace: bool) -> list:
+    def filters(self, deinterlace: bool, deep: bool = False) -> list:
         return ["bwdif"] if deinterlace else []
 
     def self_test_args(self) -> list:
@@ -266,9 +270,75 @@ class Amf(Encoder):
         return {"available": None, "name": None, "driver": None}  # not probed on Windows
 
 
+class Vaapi(Encoder):
+    """AMD Radeon cards on Linux (and in Docker), through VAAPI and Mesa's open-source driver.
+
+    How it differs from NVENC and QSV:
+    - Device: a DRM render node, like QSV on Linux (default /dev/dri/renderD128).
+    - Frames: hevc_vaapi only takes frames already on the GPU. So the filters end by converting
+      to the upload format (nv12, or p010 for 10-bit) and `hwupload`; the CPU deinterlacer runs
+      first, before the upload. This is why `filters` is told the bit depth.
+    - Quality: constant quality is `-rc_mode CQP -qp` (lower is better).
+
+    Intel's Linux driver answers VAAPI too, but automatic choice tries Quick Sync before this, so
+    an Intel machine keeps QSV and its measured levels; this encoder is meant for AMD.
+    """
+
+    name = "vaapi"
+    label = "AMD (VAAPI)"
+    codec = "hevc_vaapi"
+
+    # PLACEHOLDERS until they are measured on an RX 9070 under Linux (Mesa is a different driver
+    # from AMD's Windows one, so the Windows AMF numbers don't carry over). Replace these and this
+    # comment then.
+    QUALITY = {"low": 22, "medium": 26, "high": 30}
+    DEFAULT_DEVICE = "/dev/dri/renderD128"
+
+    def __init__(self, device: str = "") -> None:
+        self.device = (device or "").strip() or self.DEFAULT_DEVICE
+
+    @classmethod
+    def from_config(cls, config) -> "Vaapi":
+        return cls(getattr(config, "vaapi_device", ""))
+
+    @classmethod
+    def supported(cls) -> bool:
+        return not hostos.IS_WINDOWS
+
+    def input_args(self) -> list:
+        return ["-init_hw_device", f"vaapi=va:{self.device}", "-filter_hw_device", "va"]
+
+    def codec_args(self, stream: int, level: str, deep: bool) -> list:
+        # No -pix_fmt: the frames arrive as GPU surfaces from hwupload (see filters).
+        return [f"-c:v:{stream}", self.codec, "-rc_mode", "CQP",
+                "-qp", str(self.QUALITY[level]),
+                f"-profile:v:{stream}", "main10" if deep else "main"]
+
+    def filters(self, deinterlace: bool, deep: bool = False) -> list:
+        upload = ["format=p010" if deep else "format=nv12", "hwupload"]
+        return (["bwdif"] if deinterlace else []) + upload
+
+    def self_test_args(self) -> list:
+        return ["-frames:v", "1", "-vf", "format=nv12,hwupload", "-c:v", self.codec]
+
+    def usage_percent(self, run_tool: RunTool) -> Optional[int]:
+        # Reading AMD's encoder load needs extra permissions (as for Intel), so the tile shows
+        # a dash rather than a number that would mislead.
+        return None
+
+    def device_info(self, run_tool: RunTool) -> dict:
+        if not os.access(self.device, os.R_OK | os.W_OK):
+            return {"available": False, "name": None, "driver": None}
+        # vainfo, if installed, names the driver ("Mesa Gallium driver ... for AMD Radeon ...").
+        out = run_tool(["vainfo", "--display", "drm", "--device", self.device]) or ""
+        match = re.search(r"Driver version:\s*(.+)", out)
+        return {"available": True, "name": "AMD Radeon (render node)",
+                "driver": match.group(1).strip() if match else None}
+
+
 # Every encoder ShelfSaver knows, by `name`. DEFAULT_NAME is the fallback for helpers and tests
 # that need one concrete encoder; the app itself defaults to AUTO (see encoder_choice.py).
-ENCODERS = {"nvenc": Nvenc, "qsv": Qsv, "amf": Amf}
+ENCODERS = {"nvenc": Nvenc, "qsv": Qsv, "amf": Amf, "vaapi": Vaapi}
 DEFAULT_NAME = "nvenc"
 # The encoder setting that means "use whichever works": see encoder_choice.EncoderChoice.
 AUTO = "auto"
