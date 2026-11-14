@@ -437,6 +437,11 @@ class Worker:
     def run_forever(self, stop: threading.Event) -> None:
         self._stop = stop
         try:
+            # Look for the encoder now, not only when a file is due, so an idle server still
+            # shows its graphics card and the log names it at start-up.
+            self.encoder = self.encoders.before_conversion()
+            if self.encoder is not None and self.encoders.pinned:
+                logger.info("Converting with %s (set in the settings)", self.encoder.label)
             while not stop.is_set():
                 try:
                     worked = self.process_one()
@@ -819,7 +824,17 @@ class Worker:
             failed = list(self._failed_encodes)
         if len(failed) >= ENCODER_FAILURE_LIMIT:
             # Pinned: the same card check as always. Auto: look again and move to whatever works.
-            if self.encoders.after_failures() is not None:
+            used = self.encoder.name if self.encoder is not None else None
+            working = self.encoders.after_failures()
+            if working is not None and working.name != used:
+                # The card that failed was the problem, not the files: retry them on this one.
+                logger.warning("Switched to %s; trying these files again: %s", working.label,
+                               failed)
+                self.db.requeue(failed)
+                with self._lock:
+                    self._failed_encodes = []
+                return
+            if working is not None:
                 logger.warning("The graphics card works, so these files are the problem: %s",
                                failed)
                 with self._lock:

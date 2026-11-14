@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from shelfsaver import hostos
+from shelfsaver import encoders, hostos
 from shelfsaver.config import Config
 from shelfsaver.encoder_choice import BETTER_RETRY_SECONDS, RETRY_SECONDS, EncoderChoice
 from shelfsaver.encoders import Amf, Nvenc, Qsv, Vaapi
@@ -38,8 +38,10 @@ def windows(monkeypatch):
 
 
 @pytest.fixture
-def linux(monkeypatch):
+def linux(monkeypatch, tmp_path):
     monkeypatch.setattr(hostos, "IS_WINDOWS", False)
+    # No real /sys: the card's vendor is unknown, so VAAPI is allowed (see Vaapi.auto_ok).
+    monkeypatch.setattr(encoders, "SYSFS_DRM", str(tmp_path))
 
 
 def choice(works, encoder="auto", clock=None):
@@ -113,6 +115,19 @@ def test_amf_is_skipped_off_windows(linux):
 def test_linux_prefers_qsv_over_vaapi(linux):
     works = Works(qsv=True, vaapi=True)
     assert isinstance(choice(works).before_conversion(), Qsv)
+
+
+def test_an_intel_card_is_not_used_through_vaapi_under_auto(linux, monkeypatch):
+    """QSV broken on an Intel box: VAAPI works too, but it must not be taken for an AMD card."""
+    monkeypatch.setattr(Vaapi, "auto_ok", lambda self: False)
+    works = Works(vaapi=True)
+    assert choice(works).before_conversion() is None
+    assert "vaapi" not in works.calls
+
+
+def test_pinned_vaapi_is_used_on_any_card(linux, monkeypatch):
+    monkeypatch.setattr(Vaapi, "auto_ok", lambda self: False)
+    assert isinstance(choice(Works(), "vaapi").before_conversion(), Vaapi)
 
 
 def test_an_amd_linux_machine_gets_vaapi(linux):

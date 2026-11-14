@@ -357,12 +357,18 @@ build_new() {
 detect_encoder() {
     local candidates=(nvenc qsv vaapi) name label
     [[ -n "$PIN_ENCODER" ]] && candidates=("$PIN_ENCODER")
+    local mode=auto
+    [[ -n "$PIN_ENCODER" ]] && mode=pinned
     for name in "${candidates[@]}"; do
+        # Unpinned, the same rule as the app: VAAPI only on an AMD card (Encoder.auto_ok).
         if as_service_user "$NEW_DIR/venv/bin/python" -c '
 import sys
 from shelfsaver.encode import encoder_works
 from shelfsaver.encoders import ENCODERS
-sys.exit(0 if encoder_works(sys.argv[1], ENCODERS[sys.argv[2]]()) else 1)' "$FFMPEG" "$name"; then
+ffmpeg, mode, name = sys.argv[1:4]
+enc = ENCODERS[name]()
+sys.exit(0 if (mode == "pinned" or enc.auto_ok()) and encoder_works(ffmpeg, enc) else 1)' \
+            "$FFMPEG" "$mode" "$name"; then
             ENCODER="$name"
             case "$name" in
                 nvenc) label="NVIDIA NVENC" ;;

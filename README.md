@@ -258,8 +258,9 @@ wrong one, for example a Linux PC with Intel built-in graphics and a Radeon card
 Used automatically on a Windows PC with an AMD Radeon card (`hevc_amf`, in the full FFmpeg build
 the installer uses).
 
-- **Measured on an RX 9000 series card.** Older Radeon cards work too, but their encoders are
-  older and may look a little softer at the same level.
+- **The Low / Medium / High numbers are provisional** until they are measured on an RX 9000
+  series card, the way the Quick Sync ones were. Older Radeon cards will work too, but their
+  encoders are older and may look a little softer at the same level.
 - **A PC with Ryzen built-in graphics and a Radeon card** may convert on the built-in graphics,
   which is slower. Choosing the card is not offered yet.
 - **The GPU tile on the home page shows a dash** for AMD, as for Intel.
@@ -272,8 +273,12 @@ levels are measured separately.
 
 - **Needs** Mesa's VAAPI driver (`mesa-va-drivers` on Debian and Ubuntu; already in the Docker
   image) and access to the card's render node (in Docker: `--device /dev/dri`).
-- **Measured on an RX 9000 series card.** Older Radeon cards work too, but may look a little
-  softer at the same level.
+- **The Low / Medium / High numbers are provisional** until they are measured on an RX 9000
+  series card under Linux. Older Radeon cards will work too, but may look a little softer at the
+  same level.
+- **Only AMD cards are picked this way.** Intel's Linux driver answers VAAPI too, so "auto" uses
+  VAAPI only when the card reports AMD's vendor id; an Intel machine stays on Quick Sync (and if
+  Quick Sync can't start, install Intel's packages listed below rather than use VAAPI).
 - **A PC with Intel built-in graphics and a Radeon card** picks Intel; set
   `SHELFSAVER_ENCODER=vaapi` to use the Radeon card (and `SHELFSAVER_VAAPI_DEVICE` if it isn't
   `/dev/dri/renderD128`).

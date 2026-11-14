@@ -83,6 +83,32 @@ def test_vaapi_device_setting_from_file_and_env(tmp_path, monkeypatch):
     assert encoder_for(cfg).device == "/dev/dri/renderD130"
 
 
+def _vendor(tmp_path, monkeypatch, node, vendor):
+    from shelfsaver import encoders
+    monkeypatch.setattr(encoders, "SYSFS_DRM", str(tmp_path))
+    if vendor is not None:
+        (tmp_path / node / "device").mkdir(parents=True)
+        (tmp_path / node / "device" / "vendor").write_text(vendor + "\n")
+
+
+def test_vaapi_is_for_amd_cards_only_under_auto(tmp_path, monkeypatch):
+    """Intel's Linux driver answers VAAPI too; an Intel card must not be taken for an AMD one."""
+    _vendor(tmp_path, monkeypatch, "renderD128", "0x1002")
+    assert Vaapi().auto_ok() is True
+    _vendor(tmp_path / "intel", monkeypatch, "renderD128", "0x8086")
+    assert Vaapi().auto_ok() is False
+
+
+def test_vaapi_is_allowed_when_the_vendor_cannot_be_read(tmp_path, monkeypatch):
+    _vendor(tmp_path, monkeypatch, "renderD128", None)
+    assert Vaapi().auto_ok() is True
+
+
+def test_vaapi_reads_the_vendor_of_its_own_node(tmp_path, monkeypatch):
+    _vendor(tmp_path, monkeypatch, "renderD129", "0x8086")
+    assert Vaapi("/dev/dri/renderD129").auto_ok() is False
+
+
 def test_vaapi_usage_is_unknown():
     assert Vaapi().usage_percent(lambda cmd: "x") is None
 

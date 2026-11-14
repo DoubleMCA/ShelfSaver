@@ -101,7 +101,10 @@ class EncoderChoice:
     # ---- internals
 
     def _candidates(self) -> list:
-        return [n for n in ORDER if n in ENCODERS and ENCODERS[n].supported()]
+        # supported(): this operating system at all; auto_ok(): this machine's card (VAAPI is for
+        # AMD cards only). Both are cheap checks that start no program.
+        return [n for n in ORDER if n in ENCODERS and ENCODERS[n].supported()
+                and self._build(n).auto_ok()]
 
     def _build(self, name: str) -> Encoder:
         return ENCODERS[name].from_config(self._config)

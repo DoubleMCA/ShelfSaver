@@ -2111,6 +2111,8 @@ def test_the_worker_removes_a_commentary_track_when_the_library_asks(env):
 class FakeChoice:
     """Stands in for EncoderChoice: answers what the test says and counts the calls."""
 
+    pinned = False
+
     def __init__(self, before=None, after=None):
         self.before = before
         self.after = after
@@ -2171,6 +2173,29 @@ def test_failures_under_auto_switch_instead_of_pausing(env):
     assert env.worker.encoders.after_calls == 1
     assert env.worker.status()["state"] == "idle"          # moved on, not paused
     assert env.worker._failed_encodes == []
+    # The card was the problem, not the files: they get another go on the encoder that works.
+    assert [env.db.get_file(i).status for i in env.ids] == ["queued"] * 4
+
+
+def test_failures_with_the_same_encoder_still_working_fail_only_those_files(env):
+    from shelfsaver.encoders import Nvenc
+    for name in ("a.mkv", "b.mkv", "c.mkv", "d.mkv"):
+        env.queue_video(name=name)
+    env.fail_encodes()
+    env.worker.encoders = FakeChoice(before=Nvenc(), after=Nvenc())
+    [env.worker.process_one() for _ in range(3)]
+    assert [env.db.get_file(i).status for i in env.ids] == ["failed", "failed", "failed", "queued"]
+
+
+def test_the_worker_looks_for_an_encoder_when_it_starts(env):
+    """So an idle server still shows its graphics card, and the log names it at start-up."""
+    from shelfsaver.encoders import Nvenc
+    chosen = Nvenc()
+    env.worker.encoders = FakeChoice(before=chosen)
+    stop = threading.Event()
+    stop.set()                       # start, then stop at once: only the start-up work runs
+    env.worker.run_forever(stop)
+    assert env.worker.encoders.before_calls == 1 and env.worker.encoder is chosen
 
 
 def test_failures_under_auto_with_nothing_left_pause_as_before(env):

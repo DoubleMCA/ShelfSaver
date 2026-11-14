@@ -30,6 +30,10 @@ from .quality import LEVELS
 # (mcp_server._run_tool). Passed in so tests can replace it and nothing here spawns a process.
 RunTool = Callable[[list], Optional[str]]
 
+# Where Linux describes each graphics device; a render node's vendor id is in <node>/device/vendor.
+SYSFS_DRM = "/sys/class/drm"
+AMD_VENDOR_ID = "0x1002"
+
 
 class Encoder:
     """One hardware H.265 encoder. Subclasses fill in the details."""
@@ -47,6 +51,11 @@ class Encoder:
     def supported(cls) -> bool:
         """Whether this encoder can exist on this operating system at all. Automatic choice skips
         an unsupported one without starting FFmpeg."""
+        return True
+
+    def auto_ok(self) -> bool:
+        """Whether automatic choice may pick this encoder on this machine (a pinned one is always
+        used). Only VAAPI says no: on a non-AMD card it would be another vendor's driver."""
         return True
 
     def input_args(self) -> list:
@@ -304,6 +313,17 @@ class Vaapi(Encoder):
     @classmethod
     def supported(cls) -> bool:
         return not hostos.IS_WINDOWS
+
+    def auto_ok(self) -> bool:
+        """Only on an AMD card. Intel's driver answers VAAPI too, so an Intel machine whose Quick
+        Sync is broken would otherwise be converted here, labelled AMD and with AMD's numbers.
+        If the vendor can't be read (no sysfs, unusual node), allow it."""
+        vendor = os.path.join(SYSFS_DRM, os.path.basename(self.device), "device", "vendor")
+        try:
+            with open(vendor, encoding="ascii") as f:
+                return f.read().strip().lower() == AMD_VENDOR_ID
+        except (OSError, ValueError):
+            return True
 
     def input_args(self) -> list:
         return ["-init_hw_device", f"vaapi=va:{self.device}", "-filter_hw_device", "va"]
