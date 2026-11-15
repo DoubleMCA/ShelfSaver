@@ -28,6 +28,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .. import __version__, swap
 from . import folders
 from ..db import ensure_mcp_token
+from ..drive_health import DriveHealth
 from ..encoders import encoder_for
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 from ..models import IGNORED_REASON
@@ -307,8 +308,10 @@ class CrossSiteGuard:
         await self.app(scope, receive, send)
 
 
-def create_app(db, worker, scanner, config) -> FastAPI:
-    mcp_server = build_mcp(db, worker, config)
+def create_app(db, worker, scanner, config, drives: Optional[DriveHealth] = None) -> FastAPI:
+    # Without one passed in (tests), drive health is only read, never checked in the background.
+    drives = drives if drives is not None else DriveHealth(db)
+    mcp_server = build_mcp(db, worker, config, drives)
     mcp_app = mcp_server.streamable_http_app(
         streamable_http_path="/mcp", stateless_http=True, json_response=True,
         transport_security=mcp_transport_security())
@@ -492,7 +495,18 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             "held_bytes": held_bytes(fresh=False),
             "offline_libraries": [{"id": l.id, "name": l.name}
                                   for l in db.list_libraries() if l.status == "offline"],
+            "drive_notices": drives.notices(),
         }
+
+    @api.get("/drives")
+    def drive_health():
+        """What the last drive health check found. Reading never starts a check."""
+        return drives.latest()
+
+    @api.post("/drives/check")
+    def check_drives():
+        """Check drive health now and wait for the answer (at most about a minute)."""
+        return drives.check()
 
     system_usage = SystemUsage(encoder_for(config))
 

@@ -153,7 +153,8 @@ def test_everything_requires_sign_in(client):
                         ("post", "/api/pause"), ("post", "/api/pause/now"),
                         ("post", "/api/holding/clear"),
                         ("post", "/api/files/1/retry"), ("post", "/api/files/1/resolve"),
-                        ("post", "/api/files/1/delete"), ("post", "/api/files/1/ignore")]:
+                        ("post", "/api/files/1/delete"), ("post", "/api/files/1/ignore"),
+                        ("get", "/api/drives"), ("post", "/api/drives/check")]:
         assert getattr(client, method)(url).status_code == 401, url
 
 
@@ -761,6 +762,50 @@ def test_libraries_list_their_size_and_the_drives_free_space(authed, parts, tmp_
 def test_library_page_shows_size_and_free_space():
     app_js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "' in the library'" in app_js and "' free on the drive'" in app_js
+
+
+class FakeDrives:
+    def __init__(self):
+        self.checks = 0
+        self.result = {"available": True, "checked_at": 1.0, "drives": [], "problems": [],
+                       "failing_since": None}
+
+    def latest(self):
+        return self.result
+
+    def check(self):
+        self.checks += 1
+        return {**self.result, "checked_at": 2.0}
+
+    def notices(self):
+        return ["A disk behind F: reports Warning. Open Settings, then Drive health."]
+
+
+@pytest.fixture
+def drives_client(parts):
+    db, worker, scanner, config = parts
+    drives = FakeDrives()
+    with TestClient(create_app(db, worker, scanner, config, drives=drives)) as c:
+        assert c.post("/api/auth/setup", json={"password": PASSWORD}).status_code == 200
+        yield c, drives
+
+
+def test_drives_returns_the_latest_check(drives_client):
+    c, drives = drives_client
+    assert c.get("/api/drives").json()["checked_at"] == 1.0
+    assert drives.checks == 0                       # reading never starts a check
+
+
+def test_drives_check_runs_a_fresh_check(drives_client):
+    c, drives = drives_client
+    assert c.post("/api/drives/check").json()["checked_at"] == 2.0
+    assert drives.checks == 1
+
+
+def test_status_carries_the_drive_notices(drives_client):
+    c, _ = drives_client
+    assert c.get("/api/status").json()["drive_notices"] == [
+        "A disk behind F: reports Warning. Open Settings, then Drive health."]
 
 
 def test_settings_show_the_app_version(authed):
