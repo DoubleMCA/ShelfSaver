@@ -745,6 +745,24 @@ def test_clear_holding_refused_while_a_run_is_active(authed, parts, tmp_path, st
 
 # ---- settings and the MCP token
 
+def test_libraries_list_their_size_and_the_drives_free_space(authed, parts, tmp_path):
+    import shutil
+    db, *_ = parts
+    folder = make_folder(tmp_path, "movies")
+    lib = add_library(authed, folder).json()
+    db.upsert_file(lib["id"], str(folder / "a.mkv"), 1234, 1.0, "queued")
+    listed = authed.get("/api/libraries").json()[0]
+    assert listed["size_bytes"] == 1234
+    assert abs(listed["free_bytes"] - shutil.disk_usage(folder).free) < 1 << 30
+    folder.rmdir()                                     # the drive is gone: no free space to show
+    assert authed.get("/api/libraries").json()[0]["free_bytes"] is None
+
+
+def test_library_page_shows_size_and_free_space():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "' in the library'" in app_js and "' free on the drive'" in app_js
+
+
 def test_settings_show_the_app_version(authed):
     from shelfsaver import __version__
     assert authed.get("/api/settings").json()["version"] == __version__

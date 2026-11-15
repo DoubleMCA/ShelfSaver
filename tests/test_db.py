@@ -319,6 +319,16 @@ def test_timeline_keeps_an_earlier_failed_run(db, lib):
     assert failed.id in [i["id"] for i in db.timeline()]
 
 
+def test_library_size_adds_up_the_files_there_now(db, lib):
+    db.upsert_file(lib.id, "a.mkv", 300, 1.0, "converted")
+    db.upsert_file(lib.id, "b.mkv", 200, 1.0, "queued")
+    db.upsert_file(lib.id, "gone.mkv", 900, 1.0, "missing")
+    other = db.add_library("Other", "E:/Other", "medium", False)
+    db.upsert_file(other.id, "c.mkv", 50, 1.0, "queued")
+    assert db.library_size(lib.id) == 500
+    assert db.library_size(other.id + 1) == 0
+
+
 def test_going_missing_remembers_the_status_for_a_rename(db):
     lib = db.add_library("Movies", "D:\\Movies", "medium", False)
     row = db.upsert_file(lib.id, "D:\\Movies\\a.mkv", 5, 1.5, "failed", "Why")

@@ -10,6 +10,7 @@ import os
 import stat
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -409,7 +410,15 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         return {"id": library.id, "name": library.name, "path": library.path,
                 "level": library.level, "english_only": library.english_only,
                 "shrink_h265": library.shrink_h265, "remove_commentary": library.remove_commentary,
-                "status": library.status, "stats": db.stats(library.id)}
+                "status": library.status, "stats": db.stats(library.id),
+                "size_bytes": db.library_size(library.id), "free_bytes": free_space(library.path)}
+
+    def free_space(path: str) -> Optional[int]:
+        """Free bytes on the drive holding path, or None while it can't be reached."""
+        try:
+            return shutil.disk_usage(swap.ext_path(path)).free
+        except OSError:
+            return None
 
     def busy_library_ids() -> set:
         busy = set()

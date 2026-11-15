@@ -573,6 +573,12 @@ class Database:
         )
         return {"file": dict(f.__dict__) if f else None, "runs": [dict(r) for r in runs]}
 
+    def library_size(self, library_id: int) -> int:
+        """Bytes in the library now: a converted file counts at its new size."""
+        return self._query(
+            "SELECT COALESCE(SUM(size),0) AS n FROM files WHERE library_id=? AND status<>'missing'",
+            (library_id,))[0]["n"]
+
     def stats(self, library_id: Optional[int] = None) -> dict:
         run_where, file_where, args = "", "", []
         if library_id is not None:

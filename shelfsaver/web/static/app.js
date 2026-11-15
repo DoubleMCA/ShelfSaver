@@ -1004,7 +1004,11 @@
     }
 
     function drawHead(lib) {
-      var signature = JSON.stringify(lib);
+      // Sizes as shown, not in bytes: free space moves all the time during a conversion, and
+      // redrawing would replace the Options button under the pointer.
+      var shown = function (bytes) { return bytes === null || bytes === undefined ? null : fmtSize(bytes); };
+      var signature = JSON.stringify([lib.id, lib.name, lib.path, lib.status, lib.level, lib.stats,
+        lib.english_only, lib.shrink_h265, lib.remove_commentary, shown(lib.size_bytes), shown(lib.free_bytes)]);
       if (head.getAttribute('data-sig') === signature) return;
       head.setAttribute('data-sig', signature);
       fill(head,
@@ -1014,7 +1018,9 @@
             lib.status === 'offline' ? el('strong', { text: 'Offline' }) : 'Watching for new files'),
           el('div', { class: 'muted small', text: fmtCount(lib.stats.total) + ' total · ' +
             fmtSize(lib.stats.saved_bytes) + ' saved · ' +
-            plural(lib.stats.converted, 'file', 'files') + ' converted · ' + lib.stats.remaining + ' still to do' })),
+            plural(lib.stats.converted, 'file', 'files') + ' converted · ' + lib.stats.remaining + ' still to do' }),
+          el('div', { class: 'muted small', text: fmtSize(lib.size_bytes) + ' in the library' +
+            (lib.free_bytes === null || lib.free_bytes === undefined ? '' : ' · ' + fmtSize(lib.free_bytes) + ' free on the drive') })),
         el('div', { class: 'libs' },
           el('span', { class: 'pill', text: levelName(lib.level) }),
           el('button', { type: 'button', class: 'small', text: 'Options', onclick: function () { openOptions(lib); } })));
