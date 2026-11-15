@@ -552,6 +552,10 @@ class Database:
             f" SELECT 'run' AS kind, r.id AS id, {_RUN_ROW_STATUS} AS status,"
             "  COALESCE(r.finished_at, r.started_at) AS at, r.library_id AS library_id"
             "  FROM runs r LEFT JOIN files f ON f.id=r.file_id"
+            # A run that was stopped (a pause, a restart) and then started again is the same
+            # conversion as the newer run, so only the newer one is listed.
+            "  WHERE NOT (r.state='interrupted' AND EXISTS ("
+            "   SELECT 1 FROM runs later WHERE later.file_id=r.file_id AND later.id>r.id))"
             " UNION ALL"
             " SELECT 'file', f.id, f.status, f.updated_at, f.library_id FROM files f"
             f"  WHERE f.status IN ({marks})"
