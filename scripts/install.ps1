@@ -322,12 +322,13 @@ function Find-Tool([string]$name, $config) {
 }
 
 function Test-HasGpuEncoder([string]$exe) {
-    # An FFmpeg bundled with another app may be unable to use the graphics card at all.
+    # An FFmpeg bundled with another app may be unable to use the graphics card at all. Any of
+    # NVIDIA's, AMD's or Intel's encoder will do: ShelfSaver picks whichever works when it starts.
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
         $listing = & $exe -hide_banner -encoders 2>$null | Out-String
-        return ($LASTEXITCODE -eq 0 -and $listing -match '\bhevc_nvenc\b')
+        return ($LASTEXITCODE -eq 0 -and $listing -match '\bhevc_(nvenc|amf|qsv)\b')
     } catch {
         return $false
     } finally {
@@ -413,7 +414,7 @@ try {
         Install-WithWinget 'Gyan.FFmpeg' 'FFmpeg'
     }
     if ((Find-Tool 'ffmpeg' $config) -and -not (Find-EncodingFFmpeg $config)) {
-        Fail "The FFmpeg on this PC can't convert video on the NVIDIA graphics card. Install the full version by running: winget install Gyan.FFmpeg. Then run this again."
+        Fail "The FFmpeg on this PC can't convert video on a graphics card (NVIDIA, AMD or Intel). Install the full version by running: winget install Gyan.FFmpeg. Then run this again."
     }
     $ffmpeg = Get-UsableTool 'ffmpeg' $config
     $ffprobe = Get-UsableTool 'ffprobe' $config

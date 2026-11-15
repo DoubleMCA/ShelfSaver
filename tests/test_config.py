@@ -4,6 +4,32 @@ from pathlib import Path
 from shelfsaver.config import load_config
 
 
+def _encoder_from_file(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("SHELFSAVER_DATA", str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps({"encoder": value}))
+    return load_config().encoder
+
+
+def test_encoder_is_auto_when_nothing_sets_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELFSAVER_DATA", str(tmp_path))
+    assert load_config().encoder == "auto"
+
+
+def test_a_named_encoder_in_the_file_is_kept(tmp_path, monkeypatch):
+    assert _encoder_from_file(tmp_path, monkeypatch, "amf") == "amf"
+
+
+def test_auto_in_the_environment_beats_a_pinned_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELFSAVER_ENCODER", "auto")
+    assert _encoder_from_file(tmp_path, monkeypatch, "nvenc") == "auto"
+
+
+def test_encoder_names_are_normalised_and_unknown_means_auto(tmp_path, monkeypatch):
+    assert _encoder_from_file(tmp_path, monkeypatch, "AMF ") == "amf"
+    assert _encoder_from_file(tmp_path, monkeypatch, "Auto") == "auto"
+    assert _encoder_from_file(tmp_path, monkeypatch, "radeon") == "auto"
+
+
 def test_reads_tool_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("SHELFSAVER_DATA", str(tmp_path))
     (tmp_path / "config.json").write_text(json.dumps({"ffmpeg": "X:/f.exe", "other": 1}))

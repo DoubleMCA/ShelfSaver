@@ -107,7 +107,7 @@ def build_command(info: MediaInfo, decision: Decision, level: str,
             if value and value != "unknown":
                 cmd += [f"{flag}:v:{v}", value]
         deinterlace = info.field_order not in (None, "", "progressive", "unknown")
-        filters = encoder.filters(deinterlace)
+        filters = encoder.filters(deinterlace, deep)
         if filters:
             cmd += [f"-filter:v:{v}", ",".join(filters)]
         if to_mp4:

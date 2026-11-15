@@ -7,7 +7,7 @@
 # not touched.
 #
 #   sudo ./scripts/install.sh --media /srv/media [--media DIR ...] [--scratch DIR ...]
-#                             [--user NAME] [--encoder nvenc|qsv]
+#                             [--user NAME] [--encoder nvenc|qsv|vaapi]
 #   sudo ./scripts/install.sh --uninstall [--remove-data]
 #
 #   --media DIR     Folder your libraries are in (repeat for several). Needed the first time;
@@ -15,7 +15,9 @@
 #   --scratch DIR   Folder a scratch disk may be in (optional, repeatable).
 #   --user NAME     Account ShelfSaver runs as. Default: the owner of the first media folder,
 #                   so converted files keep the right owner. Never root.
-#   --encoder X     nvenc (NVIDIA) or qsv (Intel Quick Sync). Default: whichever works.
+#   --encoder X     nvenc (NVIDIA), qsv (Intel Quick Sync) or vaapi (AMD), written into the settings so
+#                   ShelfSaver always uses it. Default: ShelfSaver picks whichever works, each
+#                   time it starts (so a new graphics card needs no reinstall).
 #   --uninstall     Stops ShelfSaver and removes its service, firewall rule and program folder.
 #                   The data folder is kept unless --remove-data is also given.
 #   --remove-data   With --uninstall only: also delete the data folder (settings, history, login).
@@ -44,7 +46,8 @@ parse_args() {
     MEDIA=()
     SCRATCH=()
     RUN_USER=""
-    ENCODER=""
+    ENCODER=""      # the encoder found to work (for messages)
+    PIN_ENCODER=""  # what --encoder asked for: the only value written into config.json
     UNINSTALL=0
     REMOVE_DATA=0
     while [[ $# -gt 0 ]]; do
@@ -52,14 +55,18 @@ parse_args() {
             --media) [[ $# -ge 2 ]] || fail "--media needs a folder."; MEDIA+=("$2"); shift 2 ;;
             --scratch) [[ $# -ge 2 ]] || fail "--scratch needs a folder."; SCRATCH+=("$2"); shift 2 ;;
             --user) [[ $# -ge 2 ]] || fail "--user needs an account name."; RUN_USER="$2"; shift 2 ;;
-            --encoder) [[ $# -ge 2 ]] || fail "--encoder needs nvenc or qsv."; ENCODER="$2"; shift 2 ;;
+            --encoder) [[ $# -ge 2 ]] || fail "--encoder needs nvenc, qsv or vaapi."
+                       ENCODER="$2"; PIN_ENCODER="$2"; shift 2 ;;
             --uninstall) UNINSTALL=1; shift ;;
             --remove-data) REMOVE_DATA=1; shift ;;
-            -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            # The opening comment block (after the #! line) is the help text.
+            -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
+                           "${BASH_SOURCE[0]}"; exit 0 ;;
             *) fail "Unknown option: $1 (see --help)." ;;
         esac
     done
-    case "$ENCODER" in ""|nvenc|qsv) ;; *) fail "--encoder must be nvenc or qsv, not '$ENCODER'." ;; esac
+    case "$ENCODER" in ""|nvenc|qsv|vaapi) ;;
+        *) fail "--encoder must be nvenc, qsv or vaapi, not '$ENCODER'." ;; esac
     if [[ "$RUN_USER" == root ]]; then
         fail "ShelfSaver doesn't run as root: converted files would belong to root. Use --user with the account that owns your videos."
     fi
@@ -111,8 +118,9 @@ inside_app_dir() {
 
 # --- Settings and service file ------------------------------------------------------------------
 
-# Write config.json: keep every key already there, set encoder/ffmpeg/ffprobe, and set the media
-# and scratch roots only when given (an update without --media keeps the folders already set).
+# Write config.json: keep every key already there, set ffmpeg/ffprobe, set the encoder only when
+# --encoder was given (otherwise ShelfSaver chooses, and an encoder pinned before stays), and set
+# the media and scratch roots only when given (an update without --media keeps them).
 # Values reach Python as arguments, never as code. An unreadable file is kept as config.json.bad.
 write_config() {
     python3 - "$1" "$2" "$3" "$4" "${#MEDIA[@]}" ${MEDIA[@]+"${MEDIA[@]}"} \
@@ -133,7 +141,9 @@ if os.path.exists(path):
         print("NOTE: The old config.json could not be read. It was kept as config.json.bad "
               "and a new one will be written.")
         config = {}
-config.update(encoder=encoder, ffmpeg=ffmpeg, ffprobe=ffprobe)
+config.update(ffmpeg=ffmpeg, ffprobe=ffprobe)
+if encoder:
+    config["encoder"] = encoder
 if media:
     config["media_roots"] = media
 if scratch:
@@ -341,22 +351,35 @@ build_new() {
 }
 
 # ShelfSaver's own start-up check, run as the service user, so it also proves the account can open
-# the GPU. NVIDIA first, then Intel; --encoder checks only that one.
+# the GPU. NVIDIA, then Intel, then AMD (the order ShelfSaver uses); --encoder checks only that one.
+# This only proves that something can convert: ShelfSaver makes the actual choice each time it
+# starts.
 detect_encoder() {
-    local candidates=(nvenc qsv) name
-    [[ -n "$ENCODER" ]] && candidates=("$ENCODER")
+    local candidates=(nvenc qsv vaapi) name label
+    [[ -n "$PIN_ENCODER" ]] && candidates=("$PIN_ENCODER")
+    local mode=auto
+    [[ -n "$PIN_ENCODER" ]] && mode=pinned
     for name in "${candidates[@]}"; do
+        # Unpinned, the same rule as the app: VAAPI only on an AMD card (Encoder.auto_ok).
         if as_service_user "$NEW_DIR/venv/bin/python" -c '
 import sys
 from shelfsaver.encode import encoder_works
 from shelfsaver.encoders import ENCODERS
-sys.exit(0 if encoder_works(sys.argv[1], ENCODERS[sys.argv[2]]()) else 1)' "$FFMPEG" "$name"; then
+ffmpeg, mode, name = sys.argv[1:4]
+enc = ENCODERS[name]()
+sys.exit(0 if (mode == "pinned" or enc.auto_ok()) and encoder_works(ffmpeg, enc) else 1)' \
+            "$FFMPEG" "$mode" "$name"; then
             ENCODER="$name"
-            say "Converting with $([[ $name == nvenc ]] && echo 'NVIDIA NVENC' || echo 'Intel Quick Sync')."
+            case "$name" in
+                nvenc) label="NVIDIA NVENC" ;;
+                qsv) label="Intel Quick Sync" ;;
+                *) label="AMD (VAAPI)" ;;
+            esac
+            say "Converting with $label."
             return 0
         fi
     done
-    fail "No graphics card could convert video (tried ${candidates[*]}). For NVIDIA, install the NVIDIA driver; for Intel, install intel-media-va-driver-non-free libvpl2 libmfx-gen1.2 (on Debian these need the non-free component). Then run this again."
+    fail "No graphics card could convert video (tried ${candidates[*]}). For NVIDIA, install the NVIDIA driver; for Intel, install intel-media-va-driver-non-free libvpl2 libmfx-gen1.2 (on Debian these need the non-free component); for AMD, install mesa-va-drivers. Then run this again."
 }
 
 port_in_use() {
@@ -385,7 +408,7 @@ swap_in() {
         fail "The new version could not start from $APP_DIR."
 
     CONFIG_WRITTEN=1
-    write_config "$CONFIG_PATH" "$ENCODER" "$FFMPEG" "$FFPROBE"
+    write_config "$CONFIG_PATH" "$PIN_ENCODER" "$FFMPEG" "$FFPROBE"
     chown -- "$RUN_UID:$RUN_GID" "$CONFIG_PATH"
     chmod 600 -- "$CONFIG_PATH"
     say "Saved settings to $CONFIG_PATH"

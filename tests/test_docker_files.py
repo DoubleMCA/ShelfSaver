@@ -127,6 +127,25 @@ def test_image_name_in_workflow_matches_the_unraid_template():
     assert _template().findtext("Repository").startswith(image + ":")
 
 
+def test_image_has_amds_vaapi_driver():
+    """AMD cards on Linux encode through VAAPI with Mesa's driver, which must be in the image."""
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "mesa-va-drivers" in text.split("apt-get install", 1)[1].split("&&")[0]
+
+
+def test_unraid_encoder_defaults_to_auto_and_is_optional():
+    encoder = [c for c in _template().findall("Config") if c.get("Target") == "SHELFSAVER_ENCODER"][0]
+    assert encoder.get("Default") == "auto" and (encoder.text or "").strip() == "auto"
+    assert encoder.get("Required") == "false"
+    assert "vaapi" in encoder.get("Description")
+
+
+def test_unraid_gpu_device_is_for_intel_or_amd():
+    device = [c for c in _template().findall("Config") if c.get("Target") == "/dev/dri"][0]
+    assert "AMD" in device.get("Name") + device.get("Description")
+    assert "AMD" in _template().findtext("Overview")
+
+
 def test_dockerfile_health_check_asks_healthz():
     text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "/healthz" in text.split("HEALTHCHECK", 1)[1]

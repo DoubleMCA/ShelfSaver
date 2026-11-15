@@ -1,7 +1,7 @@
 # ShelfSaver
 
 ShelfSaver watches the video folders you choose and shrinks the files that are worth
-shrinking by converting them to H.265 on your graphics card (NVIDIA, or Intel Quick Sync). It checks every new file
+shrinking by converting them to H.265 on your graphics card (NVIDIA, AMD or Intel). It checks every new file
 (length, tracks, plays from start to finish, meaningfully smaller) before it replaces the
 original, and it never removes anything you did not agree to.
 
@@ -64,8 +64,8 @@ These show a fresh install with nothing converted yet, and the folder names are 
 
 ## Install on Windows
 
-You need Windows 11, an NVIDIA graphics card (or an Intel GPU, see
-[Intel Quick Sync](#intel-quick-sync-qsv)) and an internet connection.
+You need Windows 11, an NVIDIA, AMD or Intel graphics card and an internet connection.
+ShelfSaver uses whichever one works (see [Which graphics card is used](#which-graphics-card-is-used)).
 
 1. Download or copy this folder to the PC.
 2. Open PowerShell as administrator (right-click PowerShell, choose "Run as administrator").
@@ -121,9 +121,9 @@ sudo ./scripts/install.sh --media /srv/media
 The script installs FFmpeg and Python if they are missing, puts the program in `/opt/shelfsaver`,
 keeps settings, history and the login in `/var/lib/shelfsaver`, and sets ShelfSaver up as a systemd
 service. The service starts at boot, restarts itself if it stops, and runs as the owner of the media
-folder (never as root), so converted files keep their owner. The script also picks NVIDIA or Intel,
-whichever works, opens port 8642 if ufw or firewalld is running, and prints the web address at the
-end.
+folder (never as root), so converted files keep their owner. The script also checks that a graphics
+card can convert (ShelfSaver itself picks which one each time it starts), opens port 8642 if ufw or
+firewalld is running, and prints the web address at the end.
 
 To update, get the newer copy of this folder and run the same command again. You can leave out
 `--media` this time: the folders already set are kept. The new version is built first, then
@@ -134,7 +134,7 @@ swapped in. If it doesn't start, the old version and its settings are put back.
 | `--media DIR` | Folder your libraries are in (repeat for several). Needed the first time. |
 | `--scratch DIR` | Folder a scratch disk may be in (repeat for several). Needed before you can choose a scratch disk in Settings. |
 | `--user NAME` | Account to run as. Default: the owner of the first media folder. |
-| `--encoder nvenc\|qsv` | Skip the check and use this encoder. |
+| `--encoder nvenc\|qsv` | Check only this encoder, and always use it (written into the settings). Without it, ShelfSaver picks whichever works. |
 | `--uninstall` | Remove the service, the firewall rule and the program. Settings and history are kept. |
 | `--remove-data` | With `--uninstall`: also delete the settings, history and login. |
 
@@ -171,26 +171,29 @@ SHELFSAVER_DATA=/var/lib/shelfsaver SHELFSAVER_MEDIA_ROOTS=/media SHELFSAVER_SCR
 | `SHELFSAVER_PORT` | Web page port. Default 8642. |
 | `SHELFSAVER_HOST` | Network address the web page listens on. Default `0.0.0.0` (every network). Use `127.0.0.1` to allow only this machine, e.g. behind a reverse proxy on the same machine. |
 | `SHELFSAVER_TRUSTED_PROXIES` | Reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are believed (comma-separated addresses or networks, or `*`). Default: none. See "Security notes" below. |
-| `SHELFSAVER_ENCODER` | `nvenc` (default) or `qsv`. Works on Windows and Linux. |
+| `SHELFSAVER_ENCODER` | `auto` (default: whichever works, see [Which graphics card is used](#which-graphics-card-is-used)), or `nvenc`, `qsv`, `vaapi` (AMD on Linux) or `amf` (AMD on Windows) to always use that one. |
 | `SHELFSAVER_QSV_DEVICE` | Quick Sync only. Linux: the render node, default `/dev/dri/renderD128`. Windows: the DirectX adapter number, only needed if the PC has more than one GPU. |
+| `SHELFSAVER_VAAPI_DEVICE` | AMD on Linux only: the render node, default `/dev/dri/renderD128`. Only needed with more than one GPU. |
 
 The same names can go in `config.json` in the data folder as `media_roots`, `scratch_roots`,
-`port`, `host`, `trusted_proxies`, `encoder` and `qsv_device`; the environment wins if both are set.
+`port`, `host`, `trusted_proxies`, `encoder`, `qsv_device` and `vaapi_device`; the environment
+wins if both are set.
 
 ### Docker (Unraid, or any Linux host)
 
 The image is published as `ghcr.io/jasonadams1301-web/shelfsaver` (`latest`, or a version such as
-`0.6.2`). It has FFmpeg 7.1 (both `hevc_nvenc` and `hevc_qsv`), Intel's media driver and
-ShelfSaver, and is about 950 MB, almost all of it FFmpeg's libraries. Each release publishes a new
+`0.6.2`). It has FFmpeg 7.1 (`hevc_nvenc`, `hevc_qsv` and `hevc_vaapi`), Intel's media driver,
+Mesa's driver for AMD cards and ShelfSaver, and is about 950 MB, almost all of it FFmpeg's
+libraries. Each release publishes a new
 image, and the latest release is rebuilt every week to pick up Debian's security fixes.
 
 ```bash
-# Intel Quick Sync:
+# Intel Quick Sync or AMD (ShelfSaver finds which):
 docker run -d --name shelfsaver -p 8642:8642 --device /dev/dri \
-  -e SHELFSAVER_ENCODER=qsv -e PUID=99 -e PGID=100 \
+  -e PUID=99 -e PGID=100 \
   -v /path/to/appdata:/config -v /path/to/media:/media -v /path/to/scratch:/scratch \
   ghcr.io/jasonadams1301-web/shelfsaver:latest
-# NVIDIA (needs the NVIDIA Container Toolkit; leave SHELFSAVER_ENCODER unset):
+# NVIDIA (needs the NVIDIA Container Toolkit):
 docker run -d --name shelfsaver -p 8642:8642 --gpus all -e PUID=99 -e PGID=100 \
   -v /path/to/appdata:/config -v /path/to/media:/media -v /path/to/scratch:/scratch \
   ghcr.io/jasonadams1301-web/shelfsaver:latest
@@ -222,8 +225,11 @@ Unraid the shares already belong to nobody / users (99 / 100).
   Quick Sync) under Intel's licence. The licence text is in the image at
   `/usr/share/doc/intel-media-va-driver-non-free/copyright`.
 - **Unraid:** `docker/shelfsaver-unraid.xml` is a template; copy it to
-  `/boot/config/plugins/dockerMan/templates-user/`. It uses the published image. For NVIDIA add
-  `--runtime=nvidia` to Extra Parameters and remove the `/dev/dri` device.
+  `/boot/config/plugins/dockerMan/templates-user/`. It uses the published image. For Intel or AMD
+  keep the `/dev/dri` device. For NVIDIA add `--runtime=nvidia` to Extra Parameters and remove the
+  `/dev/dri` device. The Encoder setting defaults to `auto`; a container made from an older
+  template keeps the value it was saved with (`qsv`), so change it to `auto` (or `vaapi`) after
+  moving to an AMD card.
 - **What has been run** (the image started the normal way, as 99:100, then driven through its own
   web API: one library per quality level, a synthetic H.264 file in each, converted, verified and
   swapped in by ShelfSaver itself):
@@ -236,9 +242,60 @@ Unraid the shares already belong to nobody / users (99 / 100).
     exposes the GPU through `/dev/dxg`, not `/dev/nvidia*`). On Windows, use the Windows install
     rather than Docker.
 
+### Which graphics card is used
+
+Unless you set one, ShelfSaver picks the encoder itself each time it starts. On Windows it tries
+NVIDIA, then AMD, then Intel; on Linux and in Docker NVIDIA, then Intel, then AMD (Intel's Linux
+driver also answers AMD's route, so Intel goes first to keep Quick Sync on Intel machines). It
+uses the first that can really encode (a one-frame test). A new graphics card therefore needs no
+settings change. If none works yet (for example a driver still
+loading after an update), the home page says "No graphics card encoder found" and ShelfSaver
+looks again every minute; nothing is marked as failed. Between files it also moves back up to a
+better card that has started working, so a slow NVIDIA driver after a reboot doesn't leave it on
+the CPU's built-in graphics.
+
+To always use one, set `SHELFSAVER_ENCODER` (or `"encoder"` in `config.json`) to `nvenc`, `qsv`,
+`vaapi` or `amf`. Do that on a PC with two kinds of graphics where the order above picks the
+wrong one, for example a Linux PC with Intel built-in graphics and a Radeon card.
+
+### AMD (AMF, Windows)
+
+Used automatically on a Windows PC with an AMD Radeon card (`hevc_amf`, in the full FFmpeg build
+the installer uses).
+
+- **The Low / Medium / High numbers were measured on an RX 9070 XT** (QP 23, 25 and 28), matched
+  to NVENC's picture quality on the same clips. At the same quality the Radeon made noticeably
+  smaller files. Tested on Windows: 8-bit, 10-bit, HDR10 with its metadata, deinterlacing, MP4,
+  and a whole file through the worker. Older Radeon cards will work too, but their encoders are
+  older and may look a little softer at the same level.
+- **A PC with Ryzen built-in graphics and a Radeon card** may convert on the built-in graphics,
+  which is slower. Choosing the card is not offered yet.
+- **The GPU tile on the home page shows a dash** for AMD, as for Intel.
+
+### AMD (VAAPI, Linux and Docker)
+
+Used automatically on Linux with an AMD Radeon card and no NVIDIA or Intel GPU (`hevc_vaapi`,
+through Mesa's open-source driver). This is a different driver from Windows, so its quality
+levels are measured separately.
+
+- **Needs** Mesa's VAAPI driver (`mesa-va-drivers` on Debian and Ubuntu; already in the Docker
+  image) and access to the card's render node (in Docker: `--device /dev/dri`).
+- **The Low / Medium / High numbers are provisional** until they are measured on an RX 9000
+  series card under Linux. Older Radeon cards will work too, but may look a little softer at the
+  same level.
+- **Only AMD cards are picked this way.** Intel's Linux driver answers VAAPI too, so "auto" uses
+  VAAPI only when the card reports AMD's vendor id; an Intel machine stays on Quick Sync (and if
+  Quick Sync can't start, install Intel's packages listed below rather than use VAAPI).
+- **A PC with Intel built-in graphics and a Radeon card** picks Intel; set
+  `SHELFSAVER_ENCODER=vaapi` to use the Radeon card (and `SHELFSAVER_VAAPI_DEVICE` if it isn't
+  `/dev/dri/renderD128`).
+- **The GPU tile on the home page shows a dash**, as for Intel.
+
 ### Intel Quick Sync (QSV)
 
-Set `SHELFSAVER_ENCODER=qsv`. Needs an Intel GPU and an FFmpeg built with `hevc_qsv`.
+Used automatically when there is no NVIDIA card (and, on Windows, no AMD card), or set
+`SHELFSAVER_ENCODER=qsv`. Needs an
+Intel GPU and an FFmpeg built with `hevc_qsv`.
 
 - **Linux:** FFmpeg needs Intel's media driver and the oneVPL runtime (on Debian:
   `intel-media-va-driver-non-free libvpl2 libmfx-gen1.2`; the driver is in the non-free
@@ -246,8 +303,9 @@ Set `SHELFSAVER_ENCODER=qsv`. Needs an Intel GPU and an FFmpeg built with `hevc_
   (`--device /dev/dri/renderD128`).
 - **Windows:** uses D3D11, selected automatically. Checked on an Intel Arc Pro B70 in a PC that
   also has an AMD card: the Intel GPU was found on its own, so `SHELFSAVER_QSV_DEVICE` is only
-  needed to choose between two Intel GPUs. The installer does not switch to Quick Sync yet: add
-  `"encoder": "qsv"` to `C:\ProgramData\ShelfSaver\config.json`, then restart ShelfSaver.
+  needed to choose between two Intel GPUs. On a PC that also has an NVIDIA or AMD card, add
+  `"encoder": "qsv"` to `C:\ProgramData\ShelfSaver\config.json` to use the Intel GPU instead,
+  then restart ShelfSaver.
 - **Checked on Windows (Intel Arc Pro B70):** ShelfSaver's own command and checks passed on 8-bit
   MKV and MP4 (`hvc1` tag), interlaced (deinterlaced) and 10-bit HDR10 sources, with the HDR10
   colour tags, mastering display and light level data kept. The full test suite also passed there.
@@ -353,7 +411,8 @@ python -m venv .venv
 .venv\Scripts\python -m pytest
 ```
 
-Tests marked `gpu` need an NVIDIA graphics card. The tests also run on Linux
+Tests marked `gpu` need a working hardware encoder; they use whichever one this machine has
+(NVIDIA, AMD or Intel) and are skipped if there is none. The tests also run on Linux
 (`python -m pytest -m "not gpu"`, with `ffmpeg` and `git` installed); the few that check
 Windows-only behaviour, such as exclusive file locks, are skipped there and marked in the code.
 

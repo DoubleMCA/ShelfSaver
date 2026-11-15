@@ -98,6 +98,27 @@ def test_cpu_with_no_time_passed_or_no_reading_is_unknown(monkeypatch):
     assert usage.read()["cpu"] is None
 
 
+def test_usage_follows_an_encoder_that_changes(monkeypatch):
+    _quiet_usage(monkeypatch, [(1, 2), (2, 4), (3, 6), (4, 8)])
+    asked = []
+    monkeypatch.setattr(su, "gpu_percent", lambda encoder: asked.append(encoder) or 5)
+    current = ["first"]
+    usage = su.SystemUsage(lambda: current[0])
+    clock = [1000.0]
+    monkeypatch.setattr(su, "_now", lambda: clock[0])
+    usage.read()
+    current[0] = "second"
+    clock[0] += su.CACHE_SECONDS
+    usage.read()
+    assert asked == ["first", "second"]
+
+
+def test_usage_gpu_is_none_without_an_encoder(monkeypatch):
+    _quiet_usage(monkeypatch, [(1, 2), (2, 4)])
+    monkeypatch.setattr(su, "gpu_percent", lambda encoder: 5)
+    assert su.SystemUsage(lambda: None).read()["gpu"] is None
+
+
 def test_readings_are_shared_for_a_moment(monkeypatch):
     usage, clock = _quiet_usage(monkeypatch, [(1, 2), (2, 4), (3, 6)])
     gpu = []

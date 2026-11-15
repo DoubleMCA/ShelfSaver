@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .encoders import DEFAULT_NAME, ENCODERS
+from .encoders import AUTO, DEFAULT_NAME, ENCODERS
 
 
 @dataclass
@@ -26,11 +26,15 @@ class Config:
     trusted_proxies: str = ""
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
-    # Which hardware encoder to use: a key of encoders.ENCODERS.
+    # Which hardware encoder to use: a key of encoders.ENCODERS, or AUTO ("use whichever works").
+    # load_config() starts from AUTO; this field's own default stays a concrete encoder so code
+    # and tests that build a Config directly keep one fixed encoder, as they always have.
     encoder: str = DEFAULT_NAME
     # QSV only. Linux: the render node (default /dev/dri/renderD128). Windows: the DirectX adapter
     # number when the PC has more than one GPU (default: Windows picks).
     qsv_device: str = ""
+    # VAAPI (AMD on Linux) only: the render node. Default /dev/dri/renderD128.
+    vaapi_device: str = ""
     # Folders the web UI may browse and libraries may live in. Empty means "no restriction"
     # on Windows (drive letters, as before) and "nothing allowed yet" on Linux; see
     # web/folders.py for why Linux must be told explicitly.
@@ -99,8 +103,17 @@ def _clean_roots(values) -> list:
     return [v.strip() for v in values if isinstance(v, str) and v.strip()]
 
 
+def _encoder_name(value) -> str | None:
+    """A known encoder name or AUTO, cleaned of case and spaces, or None."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip().lower()
+    return name if name == AUTO or name in ENCODERS else None
+
+
 def load_config() -> Config:
-    cfg = Config(data_dir=_default_data_dir())
+    # Nothing named means "use whichever encoder works" (encoder_choice.py).
+    cfg = Config(data_dir=_default_data_dir(), encoder=AUTO)
     path = cfg.data_dir / "config.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -115,12 +128,13 @@ def load_config() -> Config:
             if isinstance(data.get(key), list):
                 setattr(cfg, key, _clean_roots(data[key]))
         # Cleaned exactly like the environment variable below, so the two always agree.
-        file_encoder = data.get("encoder")
-        if isinstance(file_encoder, str) and file_encoder.strip().lower() in ENCODERS:
-            cfg.encoder = file_encoder.strip().lower()
+        if _encoder_name(data.get("encoder")):
+            cfg.encoder = _encoder_name(data["encoder"])
         device = data.get("qsv_device")
         if isinstance(device, (str, int)) and not isinstance(device, bool):
             cfg.qsv_device = str(device).strip()
+        if isinstance(data.get("vaapi_device"), str):
+            cfg.vaapi_device = data["vaapi_device"].strip()
         if _valid_port(data.get("port")):
             cfg.port = _valid_port(data["port"])
         if _valid_host(data.get("host")):
@@ -135,10 +149,12 @@ def load_config() -> Config:
         if value:
             setattr(cfg, key, _clean_roots(value.split(os.pathsep)))
     # An unknown name is ignored, not fatal: the file's value (or the default) stays in force.
-    if os.environ.get("SHELFSAVER_ENCODER", "").strip().lower() in ENCODERS:
-        cfg.encoder = os.environ["SHELFSAVER_ENCODER"].strip().lower()
+    if _encoder_name(os.environ.get("SHELFSAVER_ENCODER")):
+        cfg.encoder = _encoder_name(os.environ["SHELFSAVER_ENCODER"])
     if os.environ.get("SHELFSAVER_QSV_DEVICE", "").strip():
         cfg.qsv_device = os.environ["SHELFSAVER_QSV_DEVICE"].strip()
+    if os.environ.get("SHELFSAVER_VAAPI_DEVICE", "").strip():
+        cfg.vaapi_device = os.environ["SHELFSAVER_VAAPI_DEVICE"].strip()
     if _valid_port(os.environ.get("SHELFSAVER_PORT")):
         cfg.port = _valid_port(os.environ["SHELFSAVER_PORT"])
     if _valid_host(os.environ.get("SHELFSAVER_HOST")):

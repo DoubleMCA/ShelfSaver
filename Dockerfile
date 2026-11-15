@@ -1,8 +1,8 @@
-# ShelfSaver container image (Linux, Intel Quick Sync or NVIDIA NVENC).
+# ShelfSaver container image (Linux: NVIDIA NVENC, Intel Quick Sync, or AMD through VAAPI).
 #
 # Base: Debian 13 ("trixie"). Chosen for its FFmpeg: 7.1 or newer is needed because FFmpeg 6.1
 # (Ubuntu 24.04's) drops HDR10 metadata when encoding with hevc_nvenc; 8.x keeps it.
-# Debian's FFmpeg is built with both hevc_nvenc and hevc_qsv, so one image serves both GPUs.
+# Debian's FFmpeg is built with hevc_nvenc, hevc_qsv and hevc_vaapi, so one image serves all three.
 FROM debian:trixie-slim
 
 # Standard labels. "source" is what GitHub's container registry reads to connect the package to
@@ -18,12 +18,14 @@ LABEL org.opencontainers.image.source="https://github.com/jasonadams1301-web/She
 #   python3 / python3-venv   ShelfSaver is Python; the venv keeps its libraries off the system's
 #   libvpl2, libmfx-gen1.2   oneVPL runtime FFmpeg's Quick Sync support loads at run time
 #   intel-media-va-driver-non-free  Intel's driver for the above (Quick Sync only)
-#   vainfo                   lets ShelfSaver name the Intel GPU in its status (see encoders.py)
+#   mesa-va-drivers          Mesa's VAAPI driver for AMD Radeon cards (AMD only). Trixie's is
+#                            Mesa 25.0; RX 9000 (RDNA 4) support is checked on real hardware.
+#   vainfo                   lets ShelfSaver name the Intel or AMD GPU in its status (encoders.py)
 RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
  && apt-get update \
  && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
-      ffmpeg python3 python3-venv libvpl2 libmfx-gen1.2 intel-media-va-driver-non-free vainfo \
+      ffmpeg python3 python3-venv libvpl2 libmfx-gen1.2 intel-media-va-driver-non-free mesa-va-drivers vainfo \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -23,7 +23,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__, swap
 from .db import ensure_mcp_token
-from .encoders import DEFAULT_ENCODER, ENCODERS, Encoder, encoder_for
+from .encoders import ENCODERS
 from .logs import tail_log
 
 logger = logging.getLogger(__name__)
@@ -45,10 +45,6 @@ def _run_tool(args: list[str]) -> Optional[str]:
     except (OSError, subprocess.SubprocessError):
         return None
     return (done.stdout or "") if done.returncode == 0 else None
-
-
-def _gpu(encoder: Encoder = DEFAULT_ENCODER) -> dict:
-    return encoder.device_info(_run_tool)
 
 
 def _ffmpeg(ffmpeg: str) -> dict:
@@ -84,7 +80,6 @@ def build_mcp(db, worker, config, drives=None) -> MCPServer:
     server = MCPServer("ShelfSaver", instructions=(
         "Read-only access to ShelfSaver's status, logs, files and health."))
     slow_cache: dict[str, Any] = {"at": 0.0, "value": None}
-    encoder = encoder_for(config)
 
     def status_now() -> dict:
         libraries = db.list_libraries()
@@ -103,11 +98,19 @@ def build_mcp(db, worker, config, drives=None) -> MCPServer:
         }
 
     def health_now() -> dict:
+        # The worker's encoder, which "auto" may change between files; a change refreshes the
+        # cached part at once rather than after HEALTH_CACHE_SECONDS.
+        encoder = worker.encoders.current()
+        chosen = worker.encoders.describe()["chosen"]
+        name = encoder.name if encoder is not None else None
         age = time.monotonic() - slow_cache["at"]
-        if slow_cache["value"] is None or age > HEALTH_CACHE_SECONDS:
-            slow_cache["value"] = {"gpu": _gpu(encoder), "encoder": encoder.name,
-                                   "ffmpeg": _ffmpeg(config.ffmpeg)}
+        cached = slow_cache["value"]
+        if cached is None or age > HEALTH_CACHE_SECONDS or cached["encoder"] != name:
+            gpu = (encoder.device_info(_run_tool) if encoder is not None
+                   else {"available": False, "name": None, "driver": None})
+            slow_cache["value"] = {"gpu": gpu, "encoder": name, "ffmpeg": _ffmpeg(config.ffmpeg)}
             slow_cache["at"] = time.monotonic()
+        slow_cache["value"]["encoder_chosen"] = chosen
         scratch = db.get_setting("scratch_dir") or None
         return {
             **slow_cache["value"],

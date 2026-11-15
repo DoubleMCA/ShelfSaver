@@ -19,6 +19,7 @@ from shelfsaver import hostos, swap, worker as worker_module
 from shelfsaver.__main__ import acquire_instance_lock
 from shelfsaver.config import Config
 from shelfsaver.db import Database, ensure_mcp_token
+from shelfsaver.encoder_choice import EncoderChoice
 from shelfsaver.scanner import Scanner
 from shelfsaver.web import app as app_module, folders
 from shelfsaver.web.app import SESSION_COOKIE, create_app
@@ -42,6 +43,8 @@ def make_config(tmp_path) -> Config:
 
 class FakeWorker:
     def __init__(self):
+        # A pinned NVENC choice that never runs a test, like a worker on an NVIDIA PC.
+        self.encoders = EncoderChoice(Config(data_dir="."), lambda encoder: True)
         self.calls = []
         self.paused = False
         self._holding_lock = threading.Lock()
@@ -1236,6 +1239,12 @@ def test_pages_are_served(client, route, marker):
     assert "/static/app.js" in response.text
     for asset in ("/static/app.js", "/static/style.css"):
         assert client.get(asset).status_code == 200
+
+
+def test_the_status_page_explains_no_encoder():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "worker.state === 'no_encoder'" in app_js
+    assert "No graphics card encoder found" in app_js
 
 
 def test_no_inner_html_in_app_js():

@@ -6,7 +6,7 @@ import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, Union
 
 from . import hostos
 from .encoders import DEFAULT_ENCODER, Encoder
@@ -103,7 +103,10 @@ def _cpu_times() -> Optional[tuple[int, int]]:
 
 
 class SystemUsage:
-    def __init__(self, encoder: Encoder = DEFAULT_ENCODER) -> None:
+    def __init__(self, encoder: Union[Encoder, Callable[[], Optional[Encoder]]] = DEFAULT_ENCODER
+                 ) -> None:
+        # A callable is asked on each fresh reading, so the tile follows an encoder that changes
+        # (automatic choice). None from it means no encoder yet, so the GPU figure is unknown.
         self._encoder = encoder
         self._lock = threading.Lock()
         self._last_cpu = None
@@ -126,7 +129,9 @@ class SystemUsage:
     def read(self) -> dict:
         with self._lock:
             if self._cached is None or _now() - self._cached_at >= CACHE_SECONDS:
-                self._cached = {"cpu": self._cpu_percent(), "gpu": gpu_percent(self._encoder),
+                encoder = self._encoder() if callable(self._encoder) else self._encoder
+                self._cached = {"cpu": self._cpu_percent(),
+                                "gpu": gpu_percent(encoder) if encoder is not None else None,
                                 "ram": ram_percent()}
                 self._cached_at = _now()
             return self._cached

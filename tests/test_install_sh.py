@@ -42,7 +42,7 @@ def test_first_install_needs_media(tmp_path):
 
 
 @pytest.mark.parametrize("args, message", [
-    ("--encoder amf", "nvenc or qsv"),
+    ("--encoder amf", "nvenc, qsv or vaapi"),  # AMF is Windows-only; Linux AMD is vaapi
     ("--user root", "root"),
     ("--remove-data", "--uninstall"),
     ("--frobnicate", "Unknown option"),
@@ -93,22 +93,70 @@ def test_ffmpeg_version_check(tmp_path, line, new_enough):
     assert r.returncode == (0 if new_enough else 1), r.stderr
 
 
-def _write_config(tmp_path, existing, media=(), scratch=()):
+def _write_config(tmp_path, existing, media=(), scratch=(), pin="qsv"):
+    """`pin` is what --encoder asked for; "" means it wasn't given (the app then chooses)."""
     cfg = tmp_path / "config.json"
     if existing is not None:
         cfg.write_text(existing, encoding="utf-8")
     arrays = "MEDIA=(" + " ".join(f"'{m}'" for m in media) + ")\n"
     arrays += "SCRATCH=(" + " ".join(f"'{s}'" for s in scratch) + ")\n"
-    r = run_fn(tmp_path, arrays + f'write_config "{cfg}" qsv /usr/bin/ffmpeg /usr/bin/ffprobe')
+    r = run_fn(tmp_path, arrays + f'write_config "{cfg}" "{pin}" /usr/bin/ffmpeg /usr/bin/ffprobe')
     assert r.returncode == 0, r.stderr
     return cfg, r
+
+
+def test_config_has_no_encoder_unless_asked(tmp_path):
+    cfg, _ = _write_config(tmp_path, None, media=["/m"], pin="")
+    assert "encoder" not in json.loads(cfg.read_text(encoding="utf-8"))
+
+
+def test_existing_pinned_encoder_is_kept(tmp_path):
+    cfg, _ = _write_config(tmp_path, '{"encoder": "nvenc"}', pin="")
+    assert json.loads(cfg.read_text(encoding="utf-8"))["encoder"] == "nvenc"
+
+
+def test_detect_tries_vaapi_last(tmp_path):
+    """AMD (VAAPI) is the last thing tried, so an Intel machine is still found as Quick Sync."""
+    r = run_fn(tmp_path, 'as_service_user() { return 1; }\n'
+                         'NEW_DIR=/x; FFMPEG=/usr/bin/ffmpeg; PIN_ENCODER=""\n'
+                         '( detect_encoder ) 2>err || true; cat err')
+    assert "mesa-va-drivers" in r.stdout          # the failure hint names AMD's driver
+    r = run_fn(tmp_path, 'as_service_user() { echo "${@: -1}"; return 1; }\n'
+                         'NEW_DIR=/x; FFMPEG=/usr/bin/ffmpeg; PIN_ENCODER=""\n'
+                         '( detect_encoder ) 2>/dev/null || true')
+    assert r.stdout.split() == ["nvenc", "qsv", "vaapi"]
+
+
+def test_help_shows_the_whole_option_list(tmp_path):
+    """--help prints the script's opening comment, however long it grows."""
+    r = run_fn(tmp_path, "parse_args --help")
+    assert r.returncode == 0, r.stderr
+    assert "--remove-data" in r.stdout and "never touched" in r.stdout
+    assert "set -euo" not in r.stdout and not r.stdout.startswith("!")
+
+
+def test_vaapi_is_a_valid_encoder_option(tmp_path):
+    r = run_fn(tmp_path, 'parse_args --encoder vaapi; echo "$PIN_ENCODER"')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "vaapi"
+
+
+def test_detection_alone_does_not_pin_the_encoder(tmp_path):
+    """detect_encoder finds what works, for the message; only --encoder is written down."""
+    r = run_fn(tmp_path, 'as_service_user() { [[ "$*" == *" qsv" ]]; }\n'
+                         'say() { echo "SAY $*"; }\n'
+                         'NEW_DIR=/x; FFMPEG=/usr/bin/ffmpeg; ENCODER=""; PIN_ENCODER=""\n'
+                         'detect_encoder; echo "pin=[$PIN_ENCODER]"')
+    assert r.returncode == 0, r.stderr
+    assert "SAY Converting with Intel Quick Sync." in r.stdout
+    assert "pin=[]" in r.stdout
 
 
 def test_config_keeps_other_keys_and_sets_ours(tmp_path):
     cfg, _ = _write_config(tmp_path, '{"port": 9000, "encoder": "nvenc", "media_roots": ["/old"]}',
                            media=["/srv/my videos/é"])
     data = json.loads(cfg.read_text(encoding="utf-8"))
-    assert data["port"] == 9000 and data["encoder"] == "qsv"
+    assert data["port"] == 9000 and data["encoder"] == "qsv"  # --encoder qsv was given
     assert data["media_roots"] == ["/srv/my videos/é"]
     assert data["ffmpeg"] == "/usr/bin/ffmpeg" and data["ffprobe"] == "/usr/bin/ffprobe"
     assert "scratch_roots" not in data

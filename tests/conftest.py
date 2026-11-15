@@ -13,6 +13,30 @@ def _cleanup_media_cache():
     clear_cache()
 
 
+@pytest.fixture(scope="session")
+def hardware_encoder():
+    """The encoder this machine can really use, found the way ShelfSaver finds it ("auto").
+
+    GPU tests take this instead of assuming NVIDIA, so the same tests run on an NVIDIA, AMD or
+    Intel machine. With no working encoder they skip rather than fail.
+    """
+    from pathlib import Path
+
+    from shelfsaver.config import Config
+    from shelfsaver.encode import encoder_works
+    from shelfsaver.encoder_choice import EncoderChoice
+
+    # GPU_TEST_ENCODER pins one encoder, for a machine with several cards (auto would always take
+    # the first in its order, so the others would never be tested). Not a SHELFSAVER_ variable,
+    # so the app's own settings never pick it up.
+    pinned = os.environ.get("GPU_TEST_ENCODER") or "auto"
+    found = EncoderChoice(Config(data_dir=Path("."), encoder=pinned),
+                          lambda enc: encoder_works("ffmpeg", enc)).after_failures()
+    if found is None:
+        pytest.skip(f"no working hardware encoder ({pinned})")
+    return found
+
+
 @pytest.fixture(autouse=True)
 def _no_ambient_shelfsaver_settings(monkeypatch):
     """Tests must not depend on the machine they run on.
