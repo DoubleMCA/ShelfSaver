@@ -567,3 +567,26 @@ def test_a_shrunk_h265_file_has_to_save_a_quarter(tmp_path, saved, passes):
     assert r.passed is passes
     if not passes:
         assert r.not_worth_it and r.reason == "Would not save enough"
+
+
+def test_untagged_sdr_source_tagged_bt709_by_the_encoder_passes(tmp_path):
+    """AMD's encoder writes BT.709 into untagged HD video, the standard reading of such files."""
+    import shelfsaver.verify as v
+    src = dataclasses.replace(_src(tmp_path), color_transfer=None, color_primaries=None)
+    out = probe(_out(tmp_path), "ffprobe")
+    tagged = dataclasses.replace(out, color_transfer="bt709", color_primaries="bt709")
+    assert v._tracks_ok(src, tagged, convert())
+
+
+def test_untagged_source_coming_out_hdr_still_fails(tmp_path):
+    import shelfsaver.verify as v
+    src = dataclasses.replace(_src(tmp_path), color_transfer=None)
+    out = dataclasses.replace(probe(_out(tmp_path), "ffprobe"), color_transfer="smpte2084")
+    assert not v._tracks_ok(src, out, convert())
+
+
+def test_a_tagged_transfer_changed_to_bt709_still_fails(tmp_path):
+    import shelfsaver.verify as v
+    src = dataclasses.replace(_src(tmp_path), color_transfer="smpte170m")
+    out = dataclasses.replace(probe(_out(tmp_path), "ffprobe"), color_transfer="bt709")
+    assert not v._tracks_ok(src, out, convert())

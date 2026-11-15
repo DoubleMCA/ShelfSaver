@@ -26,10 +26,14 @@ def hardware_encoder():
     from shelfsaver.encode import encoder_works
     from shelfsaver.encoder_choice import EncoderChoice
 
-    found = EncoderChoice(Config(data_dir=Path("."), encoder="auto"),
+    # GPU_TEST_ENCODER pins one encoder, for a machine with several cards (auto would always take
+    # the first in its order, so the others would never be tested). Not a SHELFSAVER_ variable,
+    # so the app's own settings never pick it up.
+    pinned = os.environ.get("GPU_TEST_ENCODER") or "auto"
+    found = EncoderChoice(Config(data_dir=Path("."), encoder=pinned),
                           lambda enc: encoder_works("ffmpeg", enc)).after_failures()
     if found is None:
-        pytest.skip("no working hardware encoder")
+        pytest.skip(f"no working hardware encoder ({pinned})")
     return found
 
 

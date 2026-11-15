@@ -40,6 +40,14 @@ def _transfer(value):
     return None if value in (None, "", "unknown") else value
 
 
+def _same_transfer(source, output) -> bool:
+    """The output keeps the original's transfer. An untagged original may come out tagged BT.709:
+    AMD's encoder writes that into untagged HD video, and it is how players read such files
+    anyway. A tagged original, or an HDR transfer appearing, must still match exactly."""
+    src, out = _transfer(source), _transfer(output)
+    return src == out or (src is None and out == "bt709")
+
+
 def _tracks_ok(source: MediaInfo, output: MediaInfo, decision: Decision) -> bool:
     removed = set(decision.remove_audio)
     for kind in ("audio", "subtitle"):
@@ -59,7 +67,7 @@ def _tracks_ok(source: MediaInfo, output: MediaInfo, decision: Decision) -> bool
             return False
     elif output.video_codec != source.video_codec:
         return False
-    if _transfer(source.color_transfer) != _transfer(output.color_transfer):
+    if not _same_transfer(source.color_transfer, output.color_transfer):
         return False
     if source.color_transfer in HDR_TRANSFERS:
         if source.color_primaries != output.color_primaries:
