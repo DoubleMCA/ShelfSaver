@@ -149,6 +149,26 @@ def test_a_new_problem_later_is_not_called_found_at_startup(server_db, caplog):
     assert "found at startup" not in line and "Warning" in line
 
 
+def test_storage_tools_failing_on_every_letter_is_a_failed_check(server_db):
+    broken = {"drives": [{"letter": "F", "kind": "unknown", "error": "Provider load failure"},
+                         {"letter": "G", "kind": "unknown", "error": "Provider load failure"}]}
+    reader = Reader()
+    clock = Clock()
+    checker = health(server_db, reader, clock)
+    checker.check()
+    reader.report = broken
+    result = checker.check()
+    assert result["failing_since"] == clock.now
+    assert {d["kind"] for d in result["drives"]} == {"pool", "disk"}   # the last good result stays
+
+
+def test_a_drive_that_is_simply_not_there_is_not_a_failed_check(server_db):
+    report = {"drives": [POOL, {"letter": "G", "kind": "unknown"}]}   # G: unplugged: no error
+    result = health(server_db, Reader(report)).check()
+    assert result["failing_since"] is None
+    assert [d["kind"] for d in result["drives"]] == ["pool", "unknown"]
+
+
 def test_unc_library_is_unknown_not_a_problem(tmp_path):
     db = Database(tmp_path / "shelfsaver.db")
     db.add_library("NAS", "\\\\nas\\tv", "medium", False)
@@ -238,6 +258,9 @@ def test_read_report_returns_the_parsed_json_and_uses_a_timeout():
 
     assert read_report(["F"], run=run) == {"drives": [POOL]}
     assert seen["timeout"] == 60 and seen["args"][0].lower().startswith("powershell")
+    # PowerShell is told to write UTF-8, and it is read as UTF-8: a pool named with accents
+    # must not break every check.
+    assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
 
 
 def test_read_report_only_accepts_drive_letters():

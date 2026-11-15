@@ -78,17 +78,23 @@ def parse_report(raw: dict) -> list[dict]:
     for item in _as_list((raw or {}).get("drives")):
         if not isinstance(item, dict):
             continue
-        pool = item.get("pool")
         drives.append({
             "letter": _text(item.get("letter")),
             "kind": item.get("kind") if item.get("kind") in ("pool", "disk") else "unknown",
-            "pool": {"name": _text(pool.get("FriendlyName")) or "Storage pool",
-                     "health": _text(pool.get("HealthStatus")),
-                     "operational": _text(pool.get("OperationalStatus"))}
-            if isinstance(pool, dict) else None,
+            "pool": _rated(item.get("pool"), "Storage pool"),
+            "virtual": _rated(item.get("virtual"), "Storage space"),
             "disks": [_disk(d) for d in _as_list(item.get("disks")) if isinstance(d, dict)],
+            "error": _text(item.get("error")),
         })
     return drives
+
+
+def _rated(raw: Any, default_name: str) -> Optional[dict]:
+    if not isinstance(raw, dict):
+        return None
+    return {"name": _text(raw.get("FriendlyName")) or default_name,
+            "health": _text(raw.get("HealthStatus")),
+            "operational": _text(raw.get("OperationalStatus"))}
 
 
 def _bad_health(health: Optional[str]) -> bool:
@@ -111,6 +117,12 @@ def problems(drives: list[dict]) -> list[dict]:
         if pool and _bad_health(pool["health"]):
             found.append({"letter": drive["letter"], "rating": pool["health"],
                           "what": f'the storage pool "{pool["name"]}"'})
+        # The space itself: after a failed disk is removed the pool can read Healthy again
+        # while the space behind the letter has lost its redundancy until it is repaired.
+        space = drive.get("virtual")
+        if space and _bad_health(space["health"]):
+            found.append({"letter": drive["letter"], "rating": space["health"],
+                          "what": f'the storage space "{space["name"]}"'})
         for disk in drive.get("disks", []):
             if _bad_health(disk["health"]):
                 rating = disk["health"]
@@ -135,6 +147,7 @@ def drive_letter(path: Optional[str]) -> Optional[str]:
 # some controllers hide them, so a disk without counters is still listed. "$(...)" turns each
 # status into its name, as Windows PowerShell may otherwise print numbers.
 SCRIPT = r"""
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 function Status($value) { @($value | ForEach-Object { "$_" }) }
@@ -159,13 +172,21 @@ $found = foreach ($letter in $letters) {
       [pscustomobject]@{ letter = $letter; kind = 'pool';
         pool = [pscustomobject]@{ FriendlyName = $pool.FriendlyName;
           HealthStatus = "$($pool.HealthStatus)"; OperationalStatus = Status $pool.OperationalStatus };
+        virtual = [pscustomobject]@{ FriendlyName = $virtual.FriendlyName;
+          HealthStatus = "$($virtual.HealthStatus)"; OperationalStatus = Status $virtual.OperationalStatus };
         disks = @(Get-PhysicalDisk -StoragePool $pool | ForEach-Object { DiskInfo $_ }) }
     } else {
       $physical = @(Get-PhysicalDisk | Where-Object { "$($_.DeviceId)" -eq "$($disk.Number)" })
       [pscustomobject]@{ letter = $letter; kind = 'disk';
         disks = @($physical | ForEach-Object { DiskInfo $_ }) }
     }
-  } catch { [pscustomobject]@{ letter = $letter; kind = 'unknown' } }
+  } catch {
+    # A drive that isn't there (unplugged, offline) is simply unknown. A drive that is there but
+    # couldn't be asked about means Windows' storage tools are failing: say why.
+    $err = $null
+    if (Test-Path -LiteralPath "$($letter):\") { $err = "$($_.Exception.Message)" }
+    [pscustomobject]@{ letter = $letter; kind = 'unknown'; error = $err }
+  }
 }
 @{ drives = @($found) } | ConvertTo-Json -Depth 6 -Compress
 """
@@ -186,7 +207,8 @@ def read_report(letters: list[str], run: Callable = subprocess.run) -> dict:
     args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
             "-EncodedCommand", encoded]
     try:
-        done = run(args, capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
+        done = run(args, capture_output=True, encoding="utf-8", errors="replace",
+                   timeout=TIMEOUT_SECONDS,
                    stdin=subprocess.DEVNULL,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired as exc:
@@ -306,6 +328,9 @@ class DriveHealth:
         try:
             report = self._read(letters) if letters else {"drives": []}
             found = {d["letter"]: d for d in parse_report(report)}
+            errors = [found[l]["error"] for l in letters if l in found and found[l]["error"]]
+            if letters and len(errors) == len(letters):
+                raise DriveCheckFailed(f"Windows' storage tools failed: {errors[0]}")
         except DriveCheckFailed as exc:
             with self._lock:
                 first = self._failing_since is None

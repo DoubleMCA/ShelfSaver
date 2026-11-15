@@ -83,6 +83,21 @@ def test_a_degraded_pool_warns_even_with_healthy_disks():
     assert p["letter"] == "F" and p["rating"] == "Warning" and "Pool1" in p["what"]
 
 
+def test_a_degraded_storage_space_warns_while_the_pool_and_disks_read_healthy():
+    """A failed disk was removed: the pool is fine again, but F:'s space has lost redundancy."""
+    raw = {"drives": [{**POOL, "virtual": {"FriendlyName": "Media", "HealthStatus": "Warning",
+                                           "OperationalStatus": "Degraded"}}]}
+    (drive,) = parse_report(raw)
+    assert drive["virtual"] == {"name": "Media", "health": "Warning", "operational": "Degraded"}
+    (p,) = problems([drive])
+    assert p["letter"] == "F" and p["rating"] == "Warning" and "Media" in p["what"]
+
+
+def test_a_letter_that_failed_keeps_its_error():
+    (drive,) = parse_report({"drives": [{"letter": "F", "kind": "unknown", "error": "WMI broke"}]})
+    assert drive["error"] == "WMI broke" and problems([drive]) == []
+
+
 def test_a_disk_rated_warning_warns():
     raw = {"drives": [{**POOL, "disks": [disk("WDC A"), disk("WDC B", health="Warning")]}]}
     assert [(p["what"], p["rating"]) for p in problems(parse_report(raw))] == [("WDC B", "Warning")]

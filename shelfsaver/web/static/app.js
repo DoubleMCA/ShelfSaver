@@ -1176,7 +1176,10 @@
     function driveBlock(drive) {
       var name = drive.letter ? drive.letter + ':' : 'Network folder';
       var head = [el('strong', { text: name }), ' '];
-      if (drive.kind === 'pool') head.push('Storage Spaces array "' + drive.pool.name + '" · ', rating(drive.pool.health));
+      if (drive.kind === 'pool' && drive.pool) {
+        head.push('Storage Spaces array "' + drive.pool.name + '" · ', rating(drive.pool.health));
+        if (drive.virtual) head.push(' · space "' + drive.virtual.name + '" · ', rating(drive.virtual.health));
+      }
       else if (drive.kind === 'unknown') head.push(el('span', { class: 'muted', text: "Can't be checked" }));
       head.push(el('span', { class: 'muted small', text: ' (' + drive.used_by.join(', ') + ')' }));
       return el('div', { class: 'drive' }, el('div', null, head),

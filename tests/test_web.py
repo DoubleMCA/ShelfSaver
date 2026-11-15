@@ -815,6 +815,10 @@ def test_settings_has_a_drive_health_section():
         assert text in app_js, text
 
 
+def test_settings_show_the_storage_space_rating():
+    assert "drive.virtual.health" in (STATIC / "app.js").read_text(encoding="utf-8")
+
+
 def test_home_shows_the_drive_notices():
     assert "status.drive_notices" in (STATIC / "app.js").read_text(encoding="utf-8")
 
