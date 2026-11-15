@@ -249,9 +249,20 @@ class Amf(Encoder):
     label = "AMD AMF"
     codec = "hevc_amf"
 
-    # PLACEHOLDERS until they are measured on an RX 9070, the same way the QSV numbers were (VMAF
-    # against NVENC's own levels on the same clips). Replace these and this comment then.
-    QUALITY = {"low": 22, "medium": 26, "high": 30}
+    # QP for each level (see quality.LEVELS). Lower is a better picture and a bigger file. MEASURED
+    # on an RX 9070 XT: 20 thirty-second clips from 10 random files (H.264 and HEVC, 8-bit and
+    # 10-bit) were encoded at QP 16 to 32 and scored with VMAF against the untouched clip. Each
+    # level is the QP whose average VMAF is closest to NVENC's for that level on the same clips:
+    #     QP 23 = 86% of the source size, VMAF 96.0   (NVENC Low: 96.3, at 179%)
+    #     QP 25 = 75% of the source size, VMAF 95.5   (NVENC Medium: 95.2, at 110%)
+    #     QP 28 = 41% of the source size, VMAF 92.3   (NVENC High: 92.9, at 64%)
+    # At the same VMAF the RX 9070 made clearly smaller files than an RTX 4060 Ti. The scale is not
+    # smooth: QP 22 came out at 119% and QP 26 at 57%, so only these three values are offered.
+    # AMF's QVBR mode was measured too and lost (bigger files at the same VMAF, and it refused
+    # every 10-bit clip), so constant QP stays. Results depend on the picture: a clip that was
+    # already efficient can come out BIGGER than the source, and the "must be smaller" check then
+    # skips it. To tune for your own files, use scripts/make_compare_clips.py --encoder amf.
+    QUALITY = {"low": 23, "medium": 25, "high": 28}
 
     @classmethod
     def supported(cls) -> bool:

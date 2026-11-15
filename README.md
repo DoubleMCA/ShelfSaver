@@ -258,9 +258,11 @@ wrong one, for example a Linux PC with Intel built-in graphics and a Radeon card
 Used automatically on a Windows PC with an AMD Radeon card (`hevc_amf`, in the full FFmpeg build
 the installer uses).
 
-- **The Low / Medium / High numbers are provisional** until they are measured on an RX 9000
-  series card, the way the Quick Sync ones were. Older Radeon cards will work too, but their
-  encoders are older and may look a little softer at the same level.
+- **The Low / Medium / High numbers were measured on an RX 9070 XT** (QP 23, 25 and 28), matched
+  to NVENC's picture quality on the same clips. At the same quality the Radeon made noticeably
+  smaller files. Tested on Windows: 8-bit, 10-bit, HDR10 with its metadata, deinterlacing, MP4,
+  and a whole file through the worker. Older Radeon cards will work too, but their encoders are
+  older and may look a little softer at the same level.
 - **A PC with Ryzen built-in graphics and a Radeon card** may convert on the built-in graphics,
   which is slower. Choosing the card is not offered yet.
 - **The GPU tile on the home page shows a dash** for AMD, as for Intel.

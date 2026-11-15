@@ -64,3 +64,8 @@ def test_amf_device_info_on_windows_does_not_start_anything():
     def run_tool(cmd):
         raise AssertionError("device_info must not start a program")
     assert Amf().device_info(run_tool)["available"] is None
+
+
+def test_amf_levels_are_the_ones_measured_on_an_rx_9070():
+    # Matched to NVENC's average VMAF per level on the same clips (see the comment in encoders.py).
+    assert Amf.QUALITY == {"low": 23, "medium": 25, "high": 28}
