@@ -1264,7 +1264,11 @@
     }
 
     function load() {
-      return api('GET', '/api/settings').then(function (loaded) { data = loaded; draw(); }, function (problem) {
+      return api('GET', '/api/settings').then(function (loaded) {
+        data = loaded;
+        byId('version').textContent = 'ShelfSaver ' + data.version;
+        draw();
+      }, function (problem) {
         if (problem.status !== 0) fill(box, el('p', { class: 'err', text: messageOf(problem) }));
       });
     }

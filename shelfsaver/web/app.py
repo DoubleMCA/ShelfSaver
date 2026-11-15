@@ -24,7 +24,7 @@ from pydantic import BaseModel, StrictBool
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .. import swap
+from .. import __version__, swap
 from . import folders
 from ..db import ensure_mcp_token
 from ..encoders import encoder_for
@@ -829,6 +829,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             "held_drives": info["held_drives"],
             "mcp_token": token,
             "mcp_command": command,
+            "version": __version__,
         }
 
     @api.patch("/settings")

@@ -745,6 +745,14 @@ def test_clear_holding_refused_while_a_run_is_active(authed, parts, tmp_path, st
 
 # ---- settings and the MCP token
 
+def test_settings_show_the_app_version(authed):
+    from shelfsaver import __version__
+    assert authed.get("/api/settings").json()["version"] == __version__
+    page = (STATIC / "settings.html").read_text(encoding="utf-8")
+    assert 'id="version"' in page
+    assert "'ShelfSaver ' + data.version" in (STATIC / "app.js").read_text(encoding="utf-8")
+
+
 def test_settings_include_the_mcp_token_and_command(authed, parts):
     db, *_ = parts
     body = authed.get("/api/settings").json()
