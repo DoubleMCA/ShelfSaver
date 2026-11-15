@@ -748,6 +748,9 @@
       items.push(notice('', [message,
         worker.state === 'no_scratch' ? [' ', el('a', { href: '/settings', text: 'Open Settings' })] : null]));
     }
+    (status.drive_notices || []).forEach(function (text) {
+      items.push(notice('', [text + ' ', el('a', { href: '/settings#drive-health', text: 'Drive health' })]));
+    });
     (status.offline_libraries || []).forEach(function (lib) {
       items.push(notice('', 'The library drive is offline for "' + lib.name + '". Check that it is connected. Other libraries carry on.'));
     });
@@ -1144,6 +1147,75 @@
         note);
     }
 
+    // ---- drive health: what Windows reports for the disks behind the libraries and scratch
+
+    function fmtChecked(seconds) {
+      return new Date(seconds * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+
+    function rating(text) {
+      return el('span', { class: text && text !== 'Healthy' ? 'fail' : null, text: text || 'Unknown' });
+    }
+
+    function known(value) { return value !== null && value !== undefined; }
+
+    function diskLine(disk) {
+      var about = [disk.media, known(disk.size) ? fmtSize(disk.size) : null].filter(Boolean);
+      var numbers = [];
+      if (known(disk.temperature) && disk.temperature > 0) numbers.push(disk.temperature + '°C');
+      if (known(disk.power_on_hours)) numbers.push(fmtCount(disk.power_on_hours) + ' h');
+      if (known(disk.read_errors) || known(disk.write_errors)) {
+        numbers.push(plural((disk.read_errors || 0) + (disk.write_errors || 0), 'error', 'errors'));
+      }
+      if (disk.media === 'SSD' && known(disk.wear)) numbers.push(disk.wear + '% worn');
+      if (disk.operational && disk.operational !== 'OK') numbers.push(disk.operational);
+      return el('li', null, disk.name + (about.length ? ' · ' + about.join(' · ') : '') + ' · ',
+        rating(disk.health), numbers.length ? ' · ' + numbers.join(' · ') : null);
+    }
+
+    function driveBlock(drive) {
+      var name = drive.letter ? drive.letter + ':' : 'Network folder';
+      var head = [el('strong', { text: name }), ' '];
+      if (drive.kind === 'pool') head.push('Storage Spaces array "' + drive.pool.name + '" · ', rating(drive.pool.health));
+      else if (drive.kind === 'unknown') head.push(el('span', { class: 'muted', text: "Can't be checked" }));
+      head.push(el('span', { class: 'muted small', text: ' (' + drive.used_by.join(', ') + ')' }));
+      return el('div', { class: 'drive' }, el('div', null, head),
+        drive.disks.length ? el('ul', { class: 'drive-disks' }, drive.disks.map(diskLine)) : null);
+    }
+
+    function drawDrives(holder, result) {
+      var parts = [el('h3', { text: 'Drive health' })];
+      if (result && !result.available) {
+        parts.push(el('p', { class: 'muted small', text: "Drive health isn't available on this system." }));
+        fill(holder, parts);
+        return;
+      }
+      var button = el('button', { type: 'button', text: 'Check drives' });
+      var note = el('p', { class: 'small', role: 'status' });
+      button.addEventListener('click', function () {
+        button.disabled = true;
+        button.textContent = 'Checking…';
+        api('POST', '/api/drives/check').then(function (fresh) { drawDrives(holder, fresh); }, function (problem) {
+          button.disabled = false;
+          button.textContent = 'Check drives';
+          note.className = 'small err';
+          note.textContent = messageOf(problem);
+        });
+      });
+      parts.push(el('p', { class: 'muted small', text: 'What Windows reports for the disks behind your libraries and scratch disk. ShelfSaver checks every hour, and warns on Home if Windows rates a disk or storage array as not healthy.' }));
+      if (!result) {
+        parts.push(el('p', { class: 'small', text: 'Loading…' }));
+      } else {
+        parts.push(el('p', { class: 'small', text: result.checked_at ? 'Checked ' + fmtChecked(result.checked_at) : 'Not checked yet' }));
+        if (result.failing_since) {
+          parts.push(el('p', { class: 'small err', text: "The latest check didn't work, so this is from the one before." }));
+        }
+        result.drives.forEach(function (drive) { parts.push(driveBlock(drive)); });
+      }
+      parts.push(button, note);
+      fill(holder, parts);
+    }
+
     function draw() {
       var scratch = el('input', { type: 'text', id: 'scratch', class: 'mono', autocomplete: 'off',
         value: data.scratch_dir || '' });
@@ -1203,6 +1275,9 @@
 
       var schedule = el('div', { class: 'setting' });
       drawSchedule(schedule);
+      var drives = el('div', { class: 'setting', id: 'drive-health' });
+      drawDrives(drives, null);
+      api('GET', '/api/drives').then(function (result) { drawDrives(drives, result); }, function () {});
 
       var languageNote = el('p', { class: 'small', role: 'status' });
       var language = el('select', { id: 'default-language' }, data.languages.map(function (choice) {
@@ -1261,7 +1336,7 @@
           el('p', { class: 'muted small', text: 'The soundtrack language to keep in libraries that remove the others. Libraries only remove soundtracks if you turn that on in their options.' }),
           el('label', { class: 'field', for: 'default-language', text: 'Language' }),
           language, languageNote),
-        schedule);
+        schedule, drives);
 
       fill(trouble,
         el('p', { class: 'small', text: 'Only needed if you want an AI assistant to look at your history. It can read but never change anything.' }),
