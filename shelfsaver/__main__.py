@@ -11,6 +11,7 @@ import uvicorn
 from . import hostos
 from .config import load_config
 from .db import Database
+from .drive_health import DriveHealth
 from .logs import setup_logging
 from .scanner import Scanner
 from .web import create_app
@@ -81,18 +82,20 @@ def main() -> None:
     worker = Worker(db, config)
     scanner = Scanner(db, config)
     worker.recover()
+    drives = DriveHealth(db)
 
     stop = threading.Event()
     stop_on_sigterm(stop)
     threads = [
         threading.Thread(target=worker.run_forever, args=(stop,), name="worker"),
         threading.Thread(target=scanner.start, args=(stop,), name="scanner"),
+        threading.Thread(target=drives.run_forever, args=(stop,), name="drives", daemon=True),
     ]
     for thread in threads:
         thread.start()
     try:
         server = uvicorn.Server(uvicorn.Config(
-            create_app(db, worker, scanner, config), **server_options(config)))
+            create_app(db, worker, scanner, config, drives), **server_options(config)))
         server.run()
     finally:
         stop.set()

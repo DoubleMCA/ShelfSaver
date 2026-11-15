@@ -2,6 +2,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 
 import pytest
 
@@ -293,6 +294,39 @@ def test_timeline_shows_a_file_with_a_run_only_as_its_run(db, lib):
     run = db.start_run(f.id, 1, "H.264", None, "why")
     assert [(i["kind"], i["id"], i["status"]) for i in db.timeline()] == [
         ("run", run.id, "skipped")]
+
+
+def test_timeline_leaves_out_an_interrupted_run_once_the_file_started_again(db, lib):
+    """Pause then resume: the stopped run and the new one are one conversion, so one row."""
+    f = db.upsert_file(lib.id, "a.mkv", 1, 1.0, "working")
+    stopped = db.start_run(f.id, 1, "H.264", None, "why")
+    db.update_run(stopped.id, state="interrupted", finished_at=time.time())
+    again = db.start_run(f.id, 1, "H.264", None, "why")
+    other = db.upsert_file(lib.id, "b.mkv", 1, 1.0, "queued")
+    waiting = db.start_run(other.id, 1, "H.264", None, "why")
+    db.update_run(waiting.id, state="interrupted", finished_at=time.time())
+    ids = [i["id"] for i in db.timeline()]
+    assert stopped.id not in ids
+    assert again.id in ids and waiting.id in ids    # the latest run of each file stays
+    assert stopped.id not in [i["id"] for i in db.timeline(kind="run")]
+
+
+def test_timeline_keeps_an_earlier_failed_run(db, lib):
+    f = db.upsert_file(lib.id, "a.mkv", 1, 1.0, "converted")
+    failed = db.start_run(f.id, 1, "H.264", None, "why")
+    db.update_run(failed.id, state="failed", finished_at=time.time())
+    db.start_run(f.id, 1, "H.264", None, "why")
+    assert failed.id in [i["id"] for i in db.timeline()]
+
+
+def test_library_size_adds_up_the_files_there_now(db, lib):
+    db.upsert_file(lib.id, "a.mkv", 300, 1.0, "converted")
+    db.upsert_file(lib.id, "b.mkv", 200, 1.0, "queued")
+    db.upsert_file(lib.id, "gone.mkv", 900, 1.0, "missing")
+    other = db.add_library("Other", "E:/Other", "medium", False)
+    db.upsert_file(other.id, "c.mkv", 50, 1.0, "queued")
+    assert db.library_size(lib.id) == 500
+    assert db.library_size(other.id + 1) == 0
 
 
 def test_going_missing_remembers_the_status_for_a_rename(db):

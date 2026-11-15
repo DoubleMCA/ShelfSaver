@@ -62,6 +62,10 @@ class FakeWorker:
         self.paused = True
         self.calls.append("pause")
 
+    def pause_after_file(self):
+        self.paused = True
+        self.calls.append("pause_after_file")
+
     def resume(self):
         self.paused = False
         self.calls.append("resume")
@@ -149,9 +153,11 @@ def test_everything_requires_sign_in(client):
     assert client.get("/api/status").status_code == 401
     for method, url in [("get", "/api/history"), ("get", "/api/libraries"), ("get", "/api/queue"),
                         ("get", "/api/settings"), ("get", "/api/browse"),
-                        ("post", "/api/pause"), ("post", "/api/holding/clear"),
+                        ("post", "/api/pause"), ("post", "/api/pause/now"),
+                        ("post", "/api/holding/clear"),
                         ("post", "/api/files/1/retry"), ("post", "/api/files/1/resolve"),
-                        ("post", "/api/files/1/delete"), ("post", "/api/files/1/ignore")]:
+                        ("post", "/api/files/1/delete"), ("post", "/api/files/1/ignore"),
+                        ("get", "/api/drives"), ("post", "/api/drives/check")]:
         assert getattr(client, method)(url).status_code == 401, url
 
 
@@ -677,7 +683,13 @@ def test_pause_and_resume(authed, parts):
     _, worker, *_ = parts
     assert authed.post("/api/pause").json()["worker"]["state"] == "paused"
     assert authed.post("/api/resume").json()["worker"]["state"] == "idle"
-    assert worker.calls == ["pause", "resume"]
+    assert worker.calls == ["pause_after_file", "resume"]   # Pause lets the current file finish
+
+
+def test_stop_now_pauses_straight_away(authed, parts):
+    _, worker, *_ = parts
+    assert authed.post("/api/pause/now").json()["worker"]["state"] == "paused"
+    assert worker.calls == ["pause"]
 
 
 # ---- holding
@@ -736,6 +748,96 @@ def test_clear_holding_refused_while_a_run_is_active(authed, parts, tmp_path, st
 
 
 # ---- settings and the MCP token
+
+def test_libraries_list_their_size_and_the_drives_free_space(authed, parts, tmp_path):
+    import shutil
+    db, *_ = parts
+    folder = make_folder(tmp_path, "movies")
+    lib = add_library(authed, folder).json()
+    db.upsert_file(lib["id"], str(folder / "a.mkv"), 1234, 1.0, "queued")
+    listed = authed.get("/api/libraries").json()[0]
+    assert listed["size_bytes"] == 1234
+    assert abs(listed["free_bytes"] - shutil.disk_usage(folder).free) < 1 << 30
+    folder.rmdir()                                     # the drive is gone: no free space to show
+    assert authed.get("/api/libraries").json()[0]["free_bytes"] is None
+
+
+def test_library_page_shows_size_and_free_space():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "' in the library'" in app_js and "' free on the drive'" in app_js
+
+
+class FakeDrives:
+    def __init__(self):
+        self.checks = 0
+        self.result = {"available": True, "checked_at": 1.0, "drives": [], "problems": [],
+                       "failing_since": None}
+
+    def latest(self):
+        return self.result
+
+    def check(self):
+        self.checks += 1
+        return {**self.result, "checked_at": 2.0}
+
+    def notices(self):
+        return ["A disk behind F: reports Warning. Open Settings, then Drive health."]
+
+
+@pytest.fixture
+def drives_client(parts):
+    db, worker, scanner, config = parts
+    drives = FakeDrives()
+    with TestClient(create_app(db, worker, scanner, config, drives=drives)) as c:
+        assert c.post("/api/auth/setup", json={"password": PASSWORD}).status_code == 200
+        yield c, drives
+
+
+def test_drives_returns_the_latest_check(drives_client):
+    c, drives = drives_client
+    assert c.get("/api/drives").json()["checked_at"] == 1.0
+    assert drives.checks == 0                       # reading never starts a check
+
+
+def test_drives_check_runs_a_fresh_check(drives_client):
+    c, drives = drives_client
+    assert c.post("/api/drives/check").json()["checked_at"] == 2.0
+    assert drives.checks == 1
+
+
+def test_status_carries_the_drive_notices(drives_client):
+    c, _ = drives_client
+    assert c.get("/api/status").json()["drive_notices"] == [
+        "A disk behind F: reports Warning. Open Settings, then Drive health."]
+
+
+def test_settings_has_a_drive_health_section():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    for text in ("'Drive health'", "'Check drives'", "'/api/drives/check'", "'/api/drives'",
+                 "Drive health isn't available on this system."):
+        assert text in app_js, text
+
+
+def test_settings_show_the_storage_space_rating():
+    assert "drive.virtual.health" in (STATIC / "app.js").read_text(encoding="utf-8")
+
+
+def test_home_shows_the_drive_notices():
+    assert "status.drive_notices" in (STATIC / "app.js").read_text(encoding="utf-8")
+
+
+def test_readme_describes_drive_health():
+    readme = (STATIC.parents[2] / "README.md").read_text(encoding="utf-8")
+    assert "Drive health" in readme
+
+
+def test_settings_show_the_app_version(authed):
+    from shelfsaver import __version__
+    assert authed.get("/api/settings").json()["version"] == __version__
+    page = (STATIC / "settings.html").read_text(encoding="utf-8")
+    assert 'id="version"' in page
+    assert "'ShelfSaver ' + data.version" in (STATIC / "app.js").read_text(encoding="utf-8")
+
 
 def test_settings_include_the_mcp_token_and_command(authed, parts):
     db, *_ = parts
@@ -1613,11 +1715,20 @@ def test_status_passes_on_the_scanners_progress(authed, parts):
 
 # ---- wording on the pages
 
-def test_pause_says_the_current_file_will_start_over():
+def test_pause_says_the_current_file_finishes_first():
     app_js = (STATIC / "app.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
-    assert "will start over when you resume" in app_js
-    assert "will start over when you resume" in index
+    assert "once the file being converted is finished" in app_js
+    assert "once the file being converted is finished" in index
+    assert "Pausing once this file is finished" in app_js
+
+
+def test_stop_now_is_offered_while_waiting_for_the_file():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "'Stop now'" in app_js and "/api/pause/now" in app_js
+    assert "will start over when you resume" in app_js   # what Stop now costs
+    assert 'id="keep-going"' in index
 
 
 def test_home_says_when_it_is_looking_through_the_libraries():

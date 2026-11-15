@@ -210,6 +210,12 @@ def test_health_with_no_encoder(parts, live, token, monkeypatch):
     assert health["gpu"] == {"available": False, "name": None, "driver": None}
 
 
+def test_health_includes_drive_health(live, token):
+    drives = call(live, token, "get_health")["drives"]
+    assert set(drives) >= {"available", "checked_at", "drives", "problems", "failing_since"}
+    assert drives["checked_at"] is None              # nothing has been checked in this test app
+
+
 def test_health_survives_missing_tools(live, token, monkeypatch):
     monkeypatch.setattr(mcp_server, "_run_tool", lambda args: None)
     health = call(live, token, "get_health")

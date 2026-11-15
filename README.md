@@ -55,6 +55,11 @@ These show a fresh install with nothing converted yet, and the folder names are 
 - Can shrink H.265 files that are far bigger than they need to be. It tests a short sample first
   and only converts when the file would come out at least 25% smaller. HDR files are left as
   they are. This is off unless you turn it on for a library.
+- Shows drive health on Windows (Settings, then Drive health): what Windows reports for every
+  disk behind your libraries and scratch disk, including each disk in a Storage Spaces array, with
+  temperature, hours and errors where the disk provides them. It checks every hour and warns on
+  Home when Windows rates a disk or storage array as not healthy. It never changes anything on a
+  disk, and it doesn't pause conversions. Not available on Linux or in Docker.
 - Offers logs and status over a read-only MCP connection.
 
 ## Install on Windows

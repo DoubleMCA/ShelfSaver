@@ -185,7 +185,8 @@ def _signed_in(parts):
     return c
 
 
-@pytest.mark.parametrize("path", ["/api/pause", "/api/resume", "/api/auth/logout"])
+@pytest.mark.parametrize("path", ["/api/pause", "/api/pause/now", "/api/resume", "/api/drives/check",
+                                  "/api/auth/logout"])
 def test_a_bodyless_change_from_another_site_is_refused(parts, path):
     """The pause/resume/logout endpoints read no body, so nothing else stops a forged form post
     from another port on the same machine (which the browser treats as the same site)."""

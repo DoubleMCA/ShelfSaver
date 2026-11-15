@@ -75,7 +75,7 @@ def _free_space(path: Optional[str]) -> dict:
         return {"path": path, "free_bytes": None}
 
 
-def build_mcp(db, worker, config) -> MCPServer:
+def build_mcp(db, worker, config, drives=None) -> MCPServer:
     """The read-only tools. Pair it with `McpGate` to serve it."""
     server = MCPServer("ShelfSaver", instructions=(
         "Read-only access to ShelfSaver's status, logs, files and health."))
@@ -120,6 +120,8 @@ def build_mcp(db, worker, config) -> MCPServer:
                               for l in db.list_libraries()],
                 "scratch": _free_space(scratch),
             },
+            # The last check's result; the tool never starts a check, so it stays quick.
+            "drives": drives.latest() if drives is not None else None,
         }
 
     def file_json(f) -> dict:
@@ -172,8 +174,9 @@ def build_mcp(db, worker, config) -> MCPServer:
 
     @server.tool()
     async def get_health() -> dict:
-        """GPU name and driver, the encoder in use, FFmpeg version and encoders, free disk space
-        and app version."""
+        """GPU name and driver, the encoder in use, FFmpeg version and encoders, free disk space,
+        drive health (the last check of the disks behind the libraries and scratch) and app
+        version."""
         return await asyncio.to_thread(health_now)
 
     return server

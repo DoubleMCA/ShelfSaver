@@ -10,6 +10,7 @@ import os
 import stat
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -24,9 +25,10 @@ from pydantic import BaseModel, StrictBool
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .. import swap
+from .. import __version__, swap
 from . import folders
 from ..db import ensure_mcp_token
+from ..drive_health import DriveHealth
 from ..mcp_server import McpGate, build_mcp, mcp_transport_security
 from ..models import IGNORED_REASON
 from ..languages import clean_language, language_choices, language_name, load_language
@@ -305,8 +307,10 @@ class CrossSiteGuard:
         await self.app(scope, receive, send)
 
 
-def create_app(db, worker, scanner, config) -> FastAPI:
-    mcp_server = build_mcp(db, worker, config)
+def create_app(db, worker, scanner, config, drives: Optional[DriveHealth] = None) -> FastAPI:
+    # Without one passed in (tests), drive health is only read, never checked in the background.
+    drives = drives if drives is not None else DriveHealth(db)
+    mcp_server = build_mcp(db, worker, config, drives)
     mcp_app = mcp_server.streamable_http_app(
         streamable_http_path="/mcp", stateless_http=True, json_response=True,
         transport_security=mcp_transport_security())
@@ -408,7 +412,15 @@ def create_app(db, worker, scanner, config) -> FastAPI:
         return {"id": library.id, "name": library.name, "path": library.path,
                 "level": library.level, "english_only": library.english_only,
                 "shrink_h265": library.shrink_h265, "remove_commentary": library.remove_commentary,
-                "status": library.status, "stats": db.stats(library.id)}
+                "status": library.status, "stats": db.stats(library.id),
+                "size_bytes": db.library_size(library.id), "free_bytes": free_space(library.path)}
+
+    def free_space(path: str) -> Optional[int]:
+        """Free bytes on the drive holding path, or None while it can't be reached."""
+        try:
+            return shutil.disk_usage(swap.ext_path(path)).free
+        except OSError:
+            return None
 
     def busy_library_ids() -> set:
         busy = set()
@@ -482,7 +494,18 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             "held_bytes": held_bytes(fresh=False),
             "offline_libraries": [{"id": l.id, "name": l.name}
                                   for l in db.list_libraries() if l.status == "offline"],
+            "drive_notices": drives.notices(),
         }
+
+    @api.get("/drives")
+    def drive_health():
+        """What the last drive health check found. Reading never starts a check."""
+        return drives.latest()
+
+    @api.post("/drives/check")
+    def check_drives():
+        """Check drive health now and wait for the answer (at most about a minute)."""
+        return drives.check()
 
     # Follows the worker's encoder, which "auto" may change between files.
     system_usage = SystemUsage(lambda: worker.encoders.current())
@@ -493,6 +516,12 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     @api.post("/pause")
     def pause():
+        """Pause once the file under way is finished; /pause/now stops it straight away."""
+        worker.pause_after_file()
+        return {"worker": worker.status()}
+
+    @api.post("/pause/now")
+    def pause_now():
         worker.pause()
         return {"worker": worker.status()}
 
@@ -823,6 +852,7 @@ def create_app(db, worker, scanner, config) -> FastAPI:
             "held_drives": info["held_drives"],
             "mcp_token": token,
             "mcp_command": command,
+            "version": __version__,
         }
 
     @api.patch("/settings")

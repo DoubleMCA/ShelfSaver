@@ -552,6 +552,10 @@ class Database:
             f" SELECT 'run' AS kind, r.id AS id, {_RUN_ROW_STATUS} AS status,"
             "  COALESCE(r.finished_at, r.started_at) AS at, r.library_id AS library_id"
             "  FROM runs r LEFT JOIN files f ON f.id=r.file_id"
+            # A run that was stopped (a pause, a restart) and then started again is the same
+            # conversion as the newer run, so only the newer one is listed.
+            "  WHERE NOT (r.state='interrupted' AND EXISTS ("
+            "   SELECT 1 FROM runs later WHERE later.file_id=r.file_id AND later.id>r.id))"
             " UNION ALL"
             " SELECT 'file', f.id, f.status, f.updated_at, f.library_id FROM files f"
             f"  WHERE f.status IN ({marks})"
@@ -568,6 +572,12 @@ class Database:
             (file_id,),
         )
         return {"file": dict(f.__dict__) if f else None, "runs": [dict(r) for r in runs]}
+
+    def library_size(self, library_id: int) -> int:
+        """Bytes in the library now: a converted file counts at its new size."""
+        return self._query(
+            "SELECT COALESCE(SUM(size),0) AS n FROM files WHERE library_id=? AND status<>'missing'",
+            (library_id,))[0]["n"]
 
     def stats(self, library_id: Optional[int] = None) -> dict:
         run_where, file_where, args = "", "", []
