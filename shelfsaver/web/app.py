@@ -493,6 +493,12 @@ def create_app(db, worker, scanner, config) -> FastAPI:
 
     @api.post("/pause")
     def pause():
+        """Pause once the file under way is finished; /pause/now stops it straight away."""
+        worker.pause_after_file()
+        return {"worker": worker.status()}
+
+    @api.post("/pause/now")
+    def pause_now():
         worker.pause()
         return {"worker": worker.status()}
 

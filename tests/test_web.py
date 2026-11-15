@@ -59,6 +59,10 @@ class FakeWorker:
         self.paused = True
         self.calls.append("pause")
 
+    def pause_after_file(self):
+        self.paused = True
+        self.calls.append("pause_after_file")
+
     def resume(self):
         self.paused = False
         self.calls.append("resume")
@@ -146,7 +150,8 @@ def test_everything_requires_sign_in(client):
     assert client.get("/api/status").status_code == 401
     for method, url in [("get", "/api/history"), ("get", "/api/libraries"), ("get", "/api/queue"),
                         ("get", "/api/settings"), ("get", "/api/browse"),
-                        ("post", "/api/pause"), ("post", "/api/holding/clear"),
+                        ("post", "/api/pause"), ("post", "/api/pause/now"),
+                        ("post", "/api/holding/clear"),
                         ("post", "/api/files/1/retry"), ("post", "/api/files/1/resolve"),
                         ("post", "/api/files/1/delete"), ("post", "/api/files/1/ignore")]:
         assert getattr(client, method)(url).status_code == 401, url
@@ -674,7 +679,13 @@ def test_pause_and_resume(authed, parts):
     _, worker, *_ = parts
     assert authed.post("/api/pause").json()["worker"]["state"] == "paused"
     assert authed.post("/api/resume").json()["worker"]["state"] == "idle"
-    assert worker.calls == ["pause", "resume"]
+    assert worker.calls == ["pause_after_file", "resume"]   # Pause lets the current file finish
+
+
+def test_stop_now_pauses_straight_away(authed, parts):
+    _, worker, *_ = parts
+    assert authed.post("/api/pause/now").json()["worker"]["state"] == "paused"
+    assert worker.calls == ["pause"]
 
 
 # ---- holding
@@ -1604,11 +1615,20 @@ def test_status_passes_on_the_scanners_progress(authed, parts):
 
 # ---- wording on the pages
 
-def test_pause_says_the_current_file_will_start_over():
+def test_pause_says_the_current_file_finishes_first():
     app_js = (STATIC / "app.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
-    assert "will start over when you resume" in app_js
-    assert "will start over when you resume" in index
+    assert "once the file being converted is finished" in app_js
+    assert "once the file being converted is finished" in index
+    assert "Pausing once this file is finished" in app_js
+
+
+def test_stop_now_is_offered_while_waiting_for_the_file():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "'Stop now'" in app_js and "/api/pause/now" in app_js
+    assert "will start over when you resume" in app_js   # what Stop now costs
+    assert 'id="keep-going"' in index
 
 
 def test_home_says_when_it_is_looking_through_the_libraries():

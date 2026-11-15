@@ -289,7 +289,8 @@ def test_success_records_the_outcome(env):
 def test_nothing_queued_returns_false_and_is_idle(env):
     assert env.worker.process_one() is False
     assert env.worker.status() == {"state": "idle", "file": None, "step": None, "percent": None,
-                                   "eta_seconds": None, "message": None, "blackout_until": None}
+                                   "eta_seconds": None, "message": None, "blackout_until": None,
+                                   "pausing": False}
 
 
 def test_holding_off_replaces_without_keeping_a_copy(env):
@@ -1129,6 +1130,97 @@ def test_pause_stops_current_and_requeues(env):
     env.use_good_encode()
     assert env.worker.process_one() is True
     assert env.status() == "converted"
+
+
+def test_pause_after_file_lets_the_current_file_finish(env):
+    started, go_on = threading.Event(), threading.Event()
+    real = env._fake_encode
+
+    def slow_then_good(cmd, duration, on_progress, should_stop):
+        started.set()
+        assert go_on.wait(30)
+        return real(cmd, duration, on_progress, should_stop)
+
+    env.use_encode(slow_then_good)
+    env.queue_video()
+    thread = threading.Thread(target=env.worker.process_one)
+    thread.start()
+    assert started.wait(30)
+    env.worker.pause_after_file()
+    status = env.worker.status()
+    assert status["state"] == "working" and status["pausing"] is True
+    go_on.set()
+    thread.join(30)
+    assert env.status() == "converted"                  # not stopped, not requeued
+    status = env.worker.status()
+    assert status["state"] == "paused" and status["pausing"] is False
+    assert env.worker.process_one() is False
+
+
+def test_pause_after_file_when_nothing_is_running_pauses_at_once(env):
+    env.worker.pause_after_file()
+    assert env.worker.status()["state"] == "paused"
+    env.queue_video()
+    assert env.worker.process_one() is False and env.status() == "queued"
+
+
+def test_stop_now_while_waiting_for_the_file_stops_it(env):
+    started = threading.Event()
+    env.use_encode(waits_for_stop(started))
+    env.queue_video()
+    thread = threading.Thread(target=env.worker.process_one)
+    thread.start()
+    assert started.wait(30)
+    env.worker.pause_after_file()
+    env.worker.pause()                                  # "Stop now"
+    thread.join(30)
+    assert not thread.is_alive()
+    assert env.status() == "queued" and env.run_row()["state"] == "interrupted"
+    assert env.worker.status()["state"] == "paused"
+    assert env.worker.status()["pausing"] is False
+
+
+def test_resume_while_waiting_for_the_file_cancels_the_pause(env):
+    started, go_on = threading.Event(), threading.Event()
+    real = env._fake_encode
+
+    def slow_then_good(cmd, duration, on_progress, should_stop):
+        started.set()
+        assert go_on.wait(30)
+        return real(cmd, duration, on_progress, should_stop)
+
+    env.use_encode(slow_then_good)
+    env.queue_video()
+    thread = threading.Thread(target=env.worker.process_one)
+    thread.start()
+    assert started.wait(30)
+    env.worker.pause_after_file()
+    env.worker.resume()
+    assert env.worker.status()["pausing"] is False
+    go_on.set()
+    thread.join(30)
+    assert env.status() == "converted"
+    assert env.worker.status()["state"] == "idle"
+
+
+def test_a_breaker_pause_keeps_its_message_over_a_waiting_pause(env):
+    started, go_on = threading.Event(), threading.Event()
+
+    def trips_breaker(cmd, duration, on_progress, should_stop):
+        started.set()
+        assert go_on.wait(30)
+        env.worker.pause(BREAKER_MESSAGE)
+        return EncodeResult(1, False, "boom")
+
+    env.use_encode(trips_breaker)
+    env.queue_video()
+    thread = threading.Thread(target=env.worker.process_one)
+    thread.start()
+    assert started.wait(30)
+    env.worker.pause_after_file()
+    go_on.set()
+    thread.join(30)
+    assert env.worker.status()["message"] == BREAKER_MESSAGE
 
 
 def test_pause_during_checking_requeues_instead_of_failing(env):

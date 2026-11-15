@@ -760,7 +760,8 @@
   // ---- Home
 
   var DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  var PAUSE_HELP = 'Stops converting. The file being converted will start over when you resume.';
+  var PAUSE_HELP = 'Stops converting once the file being converted is finished.';
+  var STOP_NOW_HELP = 'Stop the file being converted straight away. It will start over when you resume.';
 
   function basenameOfStatus(worker) { return baseName(worker.file); }
 
@@ -798,9 +799,10 @@
       line = known ? Math.round(worker.percent) + '%' +
         (worker.eta_seconds !== null && worker.eta_seconds !== undefined ? ' · ' + fmtLeft(worker.eta_seconds) : '')
         : 'Getting started…';
+      if (worker.pausing) line += ' · Pausing once this file is finished';
     } else if (worker.state === 'paused') {
       title = 'Paused';
-      line = 'Nothing will be converted until you press Resume. A file that was being converted will start over when you resume.';
+      line = 'Nothing will be converted until you press Resume. A file that was stopped part way will start over.';
     } else if (worker.state === 'blackout') {
       title = 'Blackout until ' + fmtBlackoutEnd(worker.blackout_until);
       line = 'No new files start during a blackout. You can change the times in Settings.';
@@ -827,13 +829,19 @@
     var history = createHistory(byId('history'), { showLibrary: true });
     drawHistoryTabs(byId('filters'), history);
     var pause = byId('pause');
-    var paused = false;
+    var keepGoing = byId('keep-going');
+    var paused = false, pausing = false;
 
+    function control(button, url) {
+      button.disabled = true;
+      api('POST', url).then(function () { return refresh(); }, function () {})
+        .then(function () { button.disabled = false; });
+    }
+    // Pause waits for the file under way; pressing it again while waiting stops that file now.
     pause.addEventListener('click', function () {
-      pause.disabled = true;
-      api('POST', paused ? '/api/resume' : '/api/pause').then(function () { return refresh(); }, function () {})
-        .then(function () { pause.disabled = false; });
+      control(pause, paused ? '/api/resume' : pausing ? '/api/pause/now' : '/api/pause');
     });
+    keepGoing.addEventListener('click', function () { control(keepGoing, '/api/resume'); });
 
     function drawLibraries(libs) {
       var signature = JSON.stringify(libs.map(function (l) { return [l.id, l.name, l.status]; }));
@@ -853,9 +861,11 @@
       return Promise.all([api('GET', '/api/status'), api('GET', '/api/libraries')]).then(function (all) {
         var status = all[0];
         paused = (status.worker || {}).state === 'paused';
+        pausing = !paused && !!(status.worker || {}).pausing;
         pause.hidden = false;
-        pause.textContent = paused ? 'Resume' : 'Pause';
-        pause.title = paused ? 'Start converting again' : PAUSE_HELP;
+        pause.textContent = paused ? 'Resume' : pausing ? 'Stop now' : 'Pause';
+        pause.title = paused ? 'Start converting again' : pausing ? STOP_NOW_HELP : PAUSE_HELP;
+        keepGoing.hidden = !pausing;
         byId('first-run').hidden = !status.no_scratch;
         byId('stat-saved').textContent = fmtSize(status.stats.saved_bytes);
         byId('stat-converted').textContent = fmtCount(status.stats.converted);

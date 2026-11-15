@@ -267,6 +267,8 @@ class Worker:
         self._step_started = 0.0
         self._paused = threading.Event()
         self._pause_message: Optional[str] = None
+        self._busy = False  # a file is under way (guarded by _lock)
+        self._pause_after = False  # pause once the file under way is finished (guarded by _lock)
         self._stop: Optional[threading.Event] = None
         self._next_swap_try: dict[int, float] = {}  # run id -> when a waiting run is next due
         self._next_locked_try: dict[int, float] = {}  # file id -> when a locked file is next due
@@ -281,19 +283,52 @@ class Worker:
     def status(self) -> dict:
         with self._lock:
             current = dict(self._status)
+            current["pausing"] = self._pause_after
             if self._paused.is_set():
                 current["state"] = "paused"
                 current["message"] = self._pause_message
         return current
 
     def pause(self, reason: Optional[str] = None) -> None:
+        """Stop now: the file under way is stopped, and starts over after a resume."""
         with self._lock:
+            self._pause_after = False
             self._pause_message = reason
             self._paused.set()
         logger.info("Paused: %s", reason or "at the owner's request")
 
+    def pause_after_file(self) -> None:
+        """Pause once the file under way is finished, so none of its work is lost."""
+        with self._lock:
+            if self._paused.is_set():
+                return
+            if self._busy:
+                self._pause_after = True
+                logger.info("Pausing once the current file is finished")
+                return
+            self._pause_message = None
+            self._paused.set()
+        logger.info("Paused: at the owner's request")
+
+    def _file_ended(self) -> None:
+        with self._lock:
+            self._busy = False
+            if not self._pause_after:
+                return
+            self._pause_after = False
+            if self._paused.is_set():
+                return  # already paused meanwhile, maybe with its own reason
+            self._pause_message = None
+            self._paused.set()
+        logger.info("Paused: the current file is finished")
+
+    def _file_started(self) -> None:
+        with self._lock:
+            self._busy = True
+
     def resume(self) -> None:
         with self._lock:
+            self._pause_after = False
             self._pause_message = None
             self._failed_encodes = []
             self._paused.clear()
@@ -450,7 +485,11 @@ class Worker:
         worked = self._advance_due_swaps()
         self._requeue_due_locked_files()
         if self._parked is not None:
-            return self._guarded(self._parked, self._place_new_file) or worked
+            self._file_started()
+            try:
+                return self._guarded(self._parked, self._place_new_file) or worked
+            finally:
+                self._file_ended()
 
         scratch = self._usable_scratch()
         if scratch is None:
@@ -466,6 +505,7 @@ class Worker:
         if file is None:
             self._set_idle()
             return worked
+        self._file_started()
         try:
             finished = self._process_file(file, scratch)
         except Exception:
@@ -473,6 +513,8 @@ class Worker:
             logger.exception("Unexpected error with %s", file.path)
             self.db.set_file_status(file.id, "failed", SOMETHING_WRONG)
             finished = True
+        finally:
+            self._file_ended()
         if finished:
             self._set_idle()
         return finished or worked
