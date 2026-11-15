@@ -310,6 +310,9 @@ dialog h3 { margin: 0 0 10px; font-size: 18px; }
 .setting:last-child { border-bottom: 0; }
 .setting h3 { margin: 0 0 4px; font-size: 16px; }
 .blackouts { list-style: none; margin: 8px 0; padding: 0; }
+.drive { margin: 10px 0; }
+.drive-disks { margin: 4px 0 0; padding-left: 20px; }
+.drive-disks li { margin: 2px 0; overflow-wrap: anywhere; }
 .blackout { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0; }
 .blackout-times { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }
 .blackout-days { display: flex; flex-wrap: wrap; gap: 6px 14px; border: 0; padding: 0; margin: 8px 0 12px; min-width: 0; }
